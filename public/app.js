@@ -178,7 +178,7 @@ async function loadRiskConfigs() {
 }
 
 // ============================ 绩效 tearsheet ============================
-const perfCharts = { equity: null, drawdown: null };
+const perfCharts = { equity: null, drawdown: null, rolling: null };
 
 async function loadPerformance() {
   const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || "";
@@ -202,33 +202,53 @@ async function loadPerformance() {
 function renderPerfMetrics(data) {
   const m = data.metrics || {};
   const num = (value, digits = 2) => (value === undefined || value === null ? "--" : Number(value).toFixed(digits));
-  const cards = [
-    { label: "累计收益", value: formatPercent(m.cumulative_return), cls: numberClass(m.cumulative_return) },
-    { label: "年化收益", value: formatPercent(m.annualized_return), cls: numberClass(m.annualized_return) },
-    { label: "夏普比率", value: num(m.sharpe) },
-    { label: "最大回撤", value: formatPercent(m.max_drawdown) },
-    { label: "Calmar", value: num(m.calmar) },
-    { label: "年化波动", value: formatPercent(m.annualized_volatility) },
-    { label: "日胜率", value: formatPercent(m.daily_win_rate) },
-    { label: "盈亏比", value: num(m.profit_loss_ratio) },
-    { label: "成交笔数", value: formatNumber(data.trade_count) },
-    { label: "交易天数", value: formatNumber(m.trading_days) },
-  ];
-  // 基准相对指标(有对齐到基准时追加)。
   const bench = data.benchmark;
-  if (bench && bench.metrics && Object.keys(bench.metrics).length) {
-    const bm = bench.metrics;
-    cards.push(
-      { label: `超额收益(vs ${bench.symbol})`, value: formatPercent(bm.excess_return), cls: numberClass(bm.excess_return) },
-      { label: "基准累计", value: formatPercent(bm.benchmark_cumulative), cls: numberClass(bm.benchmark_cumulative) },
-      { label: "Beta", value: num(bm.beta) },
-      { label: "年化 Alpha", value: formatPercent(bm.alpha_annualized), cls: numberClass(bm.alpha_annualized) },
-      { label: "信息比率", value: num(bm.information_ratio) },
-      { label: "跑赢基准天数", value: formatPercent(bm.win_vs_benchmark) },
-    );
+  const bm = (bench && bench.metrics) || {};
+  // 按 quantstats 思路分三组:收益 / 风险 / 相对基准。
+  const groups = [
+    {
+      title: "收益",
+      cards: [
+        { label: "累计收益", value: formatPercent(m.cumulative_return), cls: numberClass(m.cumulative_return) },
+        { label: "年化收益", value: formatPercent(m.annualized_return), cls: numberClass(m.annualized_return) },
+        { label: "成交笔数", value: formatNumber(data.trade_count) },
+        { label: "交易天数", value: formatNumber(m.trading_days) },
+      ],
+    },
+    {
+      title: "风险",
+      cards: [
+        { label: "最大回撤", value: formatPercent(m.max_drawdown), cls: "negative" },
+        { label: "年化波动", value: formatPercent(m.annualized_volatility) },
+        { label: "夏普比率", value: num(m.sharpe), cls: numberClass(m.sharpe) },
+        { label: "Calmar", value: num(m.calmar), cls: numberClass(m.calmar) },
+        { label: "日胜率", value: formatPercent(m.daily_win_rate) },
+        { label: "盈亏比", value: num(m.profit_loss_ratio) },
+      ],
+    },
+  ];
+  if (bench && bench.metrics && Object.keys(bm).length) {
+    groups.push({
+      title: `相对基准 (vs ${bench.symbol})`,
+      cards: [
+        { label: "基准累计", value: formatPercent(bm.benchmark_cumulative), cls: numberClass(bm.benchmark_cumulative) },
+        { label: "超额收益", value: formatPercent(bm.excess_return), cls: numberClass(bm.excess_return) },
+        { label: "Beta", value: num(bm.beta) },
+        { label: "年化 Alpha", value: formatPercent(bm.alpha_annualized), cls: numberClass(bm.alpha_annualized) },
+        { label: "信息比率", value: num(bm.information_ratio), cls: numberClass(bm.information_ratio) },
+        { label: "跑赢基准天数", value: formatPercent(bm.win_vs_benchmark) },
+      ],
+    });
   }
-  $("perfMetrics").innerHTML = cards
-    .map((card) => `<div class="perf-card"><span>${card.label}</span><strong class="${card.cls || ""}">${card.value}</strong></div>`)
+  $("perfMetrics").innerHTML = groups
+    .map(
+      (g) => `<div class="perf-group">
+        <h4>${g.title}</h4>
+        <div class="perf-cards">${g.cards
+          .map((c) => `<div class="perf-card"><span>${c.label}</span><strong class="${c.cls || ""}">${c.value}</strong></div>`)
+          .join("")}</div>
+      </div>`,
+    )
     .join("");
   $("perfSubtitle").textContent = `${data.account_name || ""} · ${data.points || 0} 个净值点 · 起始 ¥${formatNumber(m.start_equity)} → 当前 ¥${formatNumber(m.end_equity)}`;
 
@@ -353,6 +373,94 @@ function ensurePerfCharts() {
     if (!pt) return "";
     return `<div class="tt-date">${param.time}</div><div><span>回撤</span><b class="negative">${pt.value.toFixed(2)}%</b></div>`;
   });
+
+  // 滚动夏普:蓝线 + 0 参考线(>0 越高越稳健)。
+  const rollChart = LightweightCharts.createChart($("perfRollingChart"), chartLayout());
+  const rollSeries = rollChart.addSeries(LightweightCharts.LineSeries, {
+    color: "#2f81f7",
+    lineWidth: 2,
+    priceFormat: { type: "custom", formatter: (v) => v.toFixed(2), minMove: 0.01 },
+    crosshairMarkerVisible: true,
+  });
+  rollSeries.createPriceLine({ price: 0, color: "#565d68", lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
+  perfCharts.rolling = { chart: rollChart, series: rollSeries };
+  attachChartTooltip(rollChart, $("perfRollingChart"), (param) => {
+    const pt = param.seriesData.get(rollSeries);
+    if (!pt) return "";
+    return `<div class="tt-date">${param.time}</div><div><span>滚动夏普</span><b class="${pt.value >= 0 ? "positive" : "negative"}">${pt.value.toFixed(2)}</b></div>`;
+  });
+}
+
+// 从净值曲线算滚动 N 日年化夏普。
+function computeRollingSharpe(curve, window = 30) {
+  if (!curve || curve.length < window + 2) return [];
+  const rets = [];
+  for (let i = 1; i < curve.length; i++) {
+    const a = curve[i - 1].equity;
+    const b = curve[i].equity;
+    rets.push({ time: curve[i].time, r: a ? b / a - 1 : 0 });
+  }
+  const out = [];
+  for (let i = window - 1; i < rets.length; i++) {
+    const win = rets.slice(i - window + 1, i + 1).map((x) => x.r);
+    const mean = win.reduce((s, v) => s + v, 0) / win.length;
+    const variance = win.reduce((s, v) => s + (v - mean) ** 2, 0) / win.length;
+    const std = Math.sqrt(variance);
+    const sharpe = std > 0 ? (mean / std) * Math.sqrt(252) : 0;
+    out.push({ time: rets[i].time, value: round2(sharpe) });
+  }
+  return out;
+}
+
+// 从净值曲线算每月收益(以上月末净值为基);年度=当年各月复利。
+function computeMonthlyReturns(curve) {
+  if (!curve || curve.length < 2) return { years: [], byYear: {}, yearTotal: {} };
+  const monthEnd = new Map();
+  for (const p of curve) monthEnd.set(p.time.slice(0, 7), p.equity);
+  const keys = [...monthEnd.keys()].sort();
+  let prev = curve[0].equity;
+  const byYear = {};
+  const yearChain = {};
+  for (const k of keys) {
+    const eq = monthEnd.get(k);
+    const ret = prev ? eq / prev - 1 : 0;
+    const [y, mo] = k.split("-");
+    (byYear[y] ||= {})[parseInt(mo, 10)] = ret;
+    yearChain[y] = (yearChain[y] || 1) * (1 + ret);
+    prev = eq;
+  }
+  const yearTotal = {};
+  for (const y of Object.keys(yearChain)) yearTotal[y] = yearChain[y] - 1;
+  return { years: Object.keys(byYear).sort(), byYear, yearTotal };
+}
+
+function heatCell(ret) {
+  if (ret === undefined || ret === null) return '<td class="mr-empty">·</td>';
+  const a = Math.min(0.82, Math.abs(ret) * 6 + 0.08); // 幅度越大越深
+  const color = ret >= 0 ? `rgba(242,54,69,${a})` : `rgba(8,153,129,${a})`;
+  return `<td style="background:${color}">${(ret * 100).toFixed(1)}</td>`;
+}
+
+function renderMonthlyHeatmap(curve) {
+  const el = $("perfMonthly");
+  const { years, byYear, yearTotal } = computeMonthlyReturns(curve);
+  if (!years.length) {
+    el.innerHTML = '<div class="perf-sub">样本不足(需跨月数据)</div>';
+    return;
+  }
+  const head =
+    "<tr><th>年</th>" +
+    Array.from({ length: 12 }, (_, i) => `<th>${i + 1}月</th>`).join("") +
+    "<th>年度</th></tr>";
+  const rows = years
+    .map((y) => {
+      const cells = Array.from({ length: 12 }, (_, i) => heatCell(byYear[y][i + 1])).join("");
+      const yt = yearTotal[y];
+      const ytColor = yt >= 0 ? "var(--gain)" : "var(--loss)";
+      return `<tr><th>${y}</th>${cells}<td class="mr-total" style="color:${ytColor}">${(yt * 100).toFixed(1)}%</td></tr>`;
+    })
+    .join("");
+  el.innerHTML = `<table class="monthly-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
 }
 
 function renderPerfCharts(data) {
@@ -368,6 +476,17 @@ function renderPerfCharts(data) {
   perfCharts.equity.bench.setData(benchSeries.map((point) => ({ time: point.time, value: point.value })));
   perfCharts.equity.chart.timeScale().fitContent();
   perfCharts.drawdown.chart.timeScale().fitContent();
+
+  // 滚动夏普
+  const rolling = computeRollingSharpe(curve, 30);
+  perfCharts.rolling.series.setData(rolling);
+  perfCharts.rolling.chart.timeScale().fitContent();
+  $("perfRollingNote").textContent = rolling.length
+    ? `共 ${rolling.length} 个滚动点 · 最新 ${rolling[rolling.length - 1].value.toFixed(2)}`
+    : "样本不足:需 ≥32 个净值点才能算 30 日滚动夏普";
+
+  // 月度收益热力图
+  renderMonthlyHeatmap(curve);
 }
 
 function round2(value) {
