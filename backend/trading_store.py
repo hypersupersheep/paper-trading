@@ -1327,6 +1327,8 @@ class TradingStore:
         trade_date = str(payload.get("trade_date") or "").strip() or _today_cn()
         timestamp = payload.get("timestamp") or _trade_timestamp(trade_date, "14:30")
         interest = round(amount * annual_rate * term / 365, 2)
+        # 幂等:同一天若已有记录(自动或手动),只把利息差额计入现金,避免重复计息。
+        prev_interest = self._existing_repo_interest(account_id, trade_date)
         self._upsert_repo_record(
             account_id=account_id,
             trade_date=trade_date,
@@ -1340,11 +1342,19 @@ class TradingStore:
         with self._connection() as conn:
             conn.execute(
                 "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
-                (interest, account_id),
+                (round(interest - prev_interest, 2), account_id),
             )
         return {"trade_date": trade_date, "timestamp": timestamp, "invest_amount": amount,
                 "annual_rate": annual_rate, "interest": interest, "rate_source": rate_source,
-                "repo_symbol": repo_symbol, "term_days": term}
+                "repo_symbol": repo_symbol, "term_days": term, "replaced": prev_interest > 0}
+
+    def _existing_repo_interest(self, account_id: str, trade_date: str) -> float:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT interest FROM reverse_repo_records WHERE account_id = ? AND trade_date = ?",
+                (account_id, trade_date),
+            ).fetchone()
+        return float(row["interest"]) if row else 0.0
 
     def _upsert_repo_record(
         self,

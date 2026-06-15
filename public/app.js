@@ -187,11 +187,7 @@ const perfCharts = { equity: null, drawdown: null, rolling: null };
 async function loadPerformance() {
   const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || "";
   const markSource = $("perfBenchSource").value || ticketSource();
-  // 净值曲线现按真实账本重建,盯市用该数据源(基准也用它)。
-  if (accountId) {
-    // 自动补全闲置资金的逐日逆回购记录(幂等),让逆回购面板与曲线一致。
-    await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo/reconcile`, { data_source: markSource }).catch(() => {});
-  }
+  // 净值曲线按真实账本重建,盯市用该数据源(基准也用它)。逆回购的幂等补全统一在 loadReverseRepo 里做。
   const params = new URLSearchParams();
   if (accountId) params.set("account_id", accountId);
   params.set("data_source", markSource);
@@ -200,7 +196,6 @@ async function loadPerformance() {
   state.performance = data;
   renderPerfMetrics(data);
   renderPerfCharts(data);
-  await loadReverseRepo().catch(() => {});
 }
 
 function renderPerfMetrics(data) {
@@ -1934,6 +1929,8 @@ async function runReverseRepo(event) {
 async function loadReverseRepo() {
   const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || $("repoAccount").value;
   if (!accountId) return;
+  // 自愈:每次查看记录前先幂等补全闲置现金的逐日逆回购,保证"列表=真相"(缺哪天补哪天,不重复)。
+  await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo/reconcile`, { data_source: ticketSource() }).catch(() => {});
   let data;
   try {
     data = await fetchJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo`);
@@ -1941,7 +1938,7 @@ async function loadReverseRepo() {
     return;
   }
   const summary = data.summary || {};
-  $("repoSummary").textContent = `共 ${summary.days || 0} 日 · 累计利息 ${formatNumber(summary.total_interest || 0)}`;
+  $("repoSummary").textContent = `自动补全 · 共 ${summary.days || 0} 日 · 截至 ${summary.last_date || "—"} · 累计利息 ${formatNumber(summary.total_interest || 0)}`;
   const records = data.records || [];
   $("repoRecords").innerHTML =
     records

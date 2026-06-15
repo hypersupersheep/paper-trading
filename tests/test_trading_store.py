@@ -580,6 +580,22 @@ class TradingStoreTest(unittest.TestCase):
         repo_rec = self.trading.list_reverse_repo("acct_test")["records"][0]
         self.assertTrue(repo_rec["rate_source"].startswith("market"))
 
+    def test_reverse_repo_same_day_is_idempotent_credits_only_delta(self) -> None:
+        cash0 = self.trading.get_account("acct_test")["unallocated_cash"]
+        r1 = self.trading.run_reverse_repo(
+            "acct_test", {"amount": 100_000, "rate_mode": "custom", "annual_rate": 0.018, "trade_date": "2024-06-03"}
+        )
+        cash1 = self.trading.get_account("acct_test")["unallocated_cash"]
+        self.assertEqual(round(cash1 - cash0, 2), r1["interest"])
+        # 同一天重做(改利率)→ 只补利息差额,不重复计息;记录仍唯一(每日一条)。
+        r2 = self.trading.run_reverse_repo(
+            "acct_test", {"amount": 100_000, "rate_mode": "custom", "annual_rate": 0.036, "trade_date": "2024-06-03"}
+        )
+        cash2 = self.trading.get_account("acct_test")["unallocated_cash"]
+        self.assertEqual(round(cash2 - cash0, 2), r2["interest"])
+        self.assertTrue(r2["replaced"])
+        self.assertEqual(self.trading.list_reverse_repo("acct_test")["summary"]["days"], 1)
+
     def test_reverse_repo_market_falls_back_to_custom_without_connectors(self) -> None:
         # 没有 connectors 时 market 模式回退到自定义/账户默认,不报错
         result = self.trading.run_reverse_repo(
