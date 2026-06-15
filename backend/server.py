@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from backend import app_settings
 from backend import names as security_names
 from backend import paths
+from backend import repo
 from backend.audit_store import AuditEvent, LEDGER_TYPES, AuditStore
 from backend.backtest_store import BacktestStore
 from backend.chart_service import ChartService
@@ -142,6 +143,15 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/data/connectors/health":
                 self._json({"connectors": self.strategies.connectors.health()})
+                return
+            if path == "/api/repo/instruments":
+                self._json({"instruments": repo.INSTRUMENTS, "default": repo.DEFAULT_SYMBOL})
+                return
+            if path == "/api/repo/rate":
+                symbol = (query.get("symbol") or repo.DEFAULT_SYMBOL).upper()
+                connector = self.strategies.connectors.get(query.get("data_source"))
+                quote = repo.fetch_latest_rate(connector, symbol)
+                self._json(quote or {"symbol": symbol, "annual_rate": None, "error": "行情取不到该逆回购利率"})
                 return
             if path == "/api/chart/bars":
                 self._json(self.charts.get_bars(query))
@@ -499,17 +509,20 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         ]
         today = self._today_cn()
         daily_closes: dict[str, dict[str, float]] = {}
+        repo_rates: dict[str, float] = {}
         symbols = sorted({str(f["symbol"]).upper() for f in fills})
         if fills and symbols:
             start_date = min(str(f["timestamp"])[:10] for f in fills)
+            connector = self.strategies.connectors.get(data_source or app_settings.default_data_source())
             try:
-                connector = self.strategies.connectors.get(data_source or app_settings.default_data_source())
                 bars = connector.get_bars(symbols, frequency="1d", limit=2000, start=start_date, end=today)
                 for bar in bars:
                     sym = str(bar["symbol"]).upper()
                     daily_closes.setdefault(sym, {})[str(bar["timestamp"])[:10]] = float(bar["close"])
             except Exception:  # noqa: BLE001 - 盯市取数失败就用成交价兜底
                 daily_closes = {}
+            # 闲置现金的逐日逆回购利率:按实时行情(GC001 逐日年化),取不到则回退账户默认利率。
+            repo_rates = repo.fetch_daily_rates(connector, repo.DEFAULT_SYMBOL, start=start_date, end=today)
         return reconstruct_nav(
             initial_cash=account["initial_cash"],
             fills=fills,
@@ -518,6 +531,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             repo_annual_rate=account["reverse_repo_annual_rate"],
             today=today,
             repo_enabled=bool(account["auto_reverse_repo_enabled"]),
+            repo_rates=repo_rates,
         )
 
     def _performance(self, query: dict) -> dict:

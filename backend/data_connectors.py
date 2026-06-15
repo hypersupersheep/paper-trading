@@ -582,6 +582,10 @@ def _business_days_between(start: Any, end: Any, fallback_count: int):
 
 
 def _base_price(symbol: str) -> float:
+    from backend import repo
+
+    if repo.is_repo_symbol(symbol):
+        return 1.8  # 国债逆回购:close=年化利率%,fixture 给 ~1.8% 档(带日内小波动)
     if symbol.startswith("600519"):
         return 1725.0
     if symbol.startswith("000858"):

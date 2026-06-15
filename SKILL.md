@@ -109,7 +109,8 @@ GET  /api/backtest/{id}/export?format=csv|json   下载
 GET  /api/portfolio/performance        绩效 tearsheet(净值曲线从账本重建,从首笔成交起;?data_source= 盯市/?benchmark=)
 GET  /api/portfolio/summary            组合盯市
 GET  /api/accounts/{id}/reverse-repo            国债逆回购记录(独立账本,不在主审计流水)
-POST /api/accounts/{id}/reverse-repo            手动逆回购(默认当日14:30)
+POST /api/accounts/{id}/reverse-repo            手动逆回购(默认14:30;rate_mode=market 按GC001实时利率,或 custom 自定义 annual_rate)
+GET  /api/repo/rate?symbol=204001.SH            逆回购实时年化利率;GET /api/repo/instruments 品种清单
 POST /api/accounts/{id}/reverse-repo/reconcile  幂等补全闲置现金的逐日逆回购
 GET  /api/quotes?symbols=...           批量行情
 GET  /api/audit/chain/{event_id}       审计链路

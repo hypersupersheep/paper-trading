@@ -52,6 +52,7 @@ def reconstruct(
     repo_annual_rate: float,
     today: str,
     repo_enabled: bool = True,
+    repo_rates: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """重建净值曲线 + 逆回购逐日计划。
 
@@ -116,17 +117,20 @@ def reconstruct(
         # 2) 当日现金流(成交本金+费用等)
         trading_cash = round(trading_cash + cash_by_day.get(day, 0.0), 2)
 
-        # 3) 闲置现金计提逆回购(到下个交易日的天数)
+        # 3) 闲置现金计提逆回购(到下个交易日的天数);利率优先用当日实时行情,缺则账户默认。
         day_str = day.isoformat()
-        if repo_enabled and trading_cash > 0 and repo_annual_rate > 0:
+        market_rate = (repo_rates or {}).get(day_str)
+        day_rate = market_rate if market_rate is not None else repo_annual_rate
+        if repo_enabled and trading_cash > 0 and day_rate > 0:
             gap = (days[i + 1] - day).days if i + 1 < len(days) else 1
-            interest = round(trading_cash * repo_annual_rate * gap / 365, 2)
+            interest = round(trading_cash * day_rate * gap / 365, 2)
             cum_interest = round(cum_interest + interest, 2)
             repo_schedule.append({
                 "trade_date": day_str,
                 "principal": trading_cash,
                 "interest": interest,
-                "annual_rate": repo_annual_rate,
+                "annual_rate": day_rate,
+                "rate_source": "market" if market_rate is not None else "auto",
                 "timestamp": f"{day_str}T14:30:00+08:00",
             })
 

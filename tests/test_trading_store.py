@@ -566,6 +566,28 @@ class TradingStoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.trading.delete_account("acct_nope")
 
+    def test_reverse_repo_market_rate_uses_live_quote(self) -> None:
+        from backend.data_connectors import DataConnectorRegistry
+
+        self.trading.connectors = DataConnectorRegistry()
+        result = self.trading.run_reverse_repo(
+            "acct_test", {"amount": 400_000, "rate_mode": "market", "data_source": "fixture", "trade_date": "2024-05-06"}
+        )
+        # fixture GC001 ~1.8% → 利率约 0.018,来源标记 market
+        self.assertGreater(result["annual_rate"], 0.005)
+        self.assertLess(result["annual_rate"], 0.05)
+        self.assertTrue(result["rate_source"].startswith("market"))
+        repo_rec = self.trading.list_reverse_repo("acct_test")["records"][0]
+        self.assertTrue(repo_rec["rate_source"].startswith("market"))
+
+    def test_reverse_repo_market_falls_back_to_custom_without_connectors(self) -> None:
+        # 没有 connectors 时 market 模式回退到自定义/账户默认,不报错
+        result = self.trading.run_reverse_repo(
+            "acct_test", {"amount": 100_000, "rate_mode": "market", "annual_rate": 0.02}
+        )
+        self.assertEqual(result["annual_rate"], 0.02)
+        self.assertEqual(result["rate_source"], "custom")
+
     def test_backfill_without_sleeve_uses_existing_default(self) -> None:
         # 账户已有一个 sleeve(setUp 建的),不指定 sleeve_id 应自动落到它,不新建。
         result = self.trading.backfill_trade(

@@ -11,6 +11,7 @@ from typing import Any
 from backend import app_settings
 from backend import friction
 from backend import names as security_names
+from backend import repo
 from backend.audit_store import AuditEvent, AuditStore
 from backend.data_connectors import normalize_frequency
 
@@ -163,6 +164,7 @@ class TradingStore:
                 )
                 """
             )
+            self._ensure_column(conn, "reverse_repo_records", "rate_source", "TEXT NOT NULL DEFAULT 'custom'")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -1286,7 +1288,10 @@ class TradingStore:
     def run_reverse_repo(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         """手动国债逆回购:记入独立逆回购账本(不进主审计流水),利息计入未分配现金。
 
-        默认交易日=今天、时间=当日 14:30(A股逆回购常在尾盘挂单);可由 payload 覆盖。
+        利率来源二选一:
+          - rate_mode="market":按实时行情——拉逆回购品种(默认 GC001/204001.SH)最新年化利率;
+          - rate_mode="custom"(默认):用 payload.annual_rate 或账户默认利率(保留自定义权限)。
+        取不到实时行情时自动回退到自定义,不报错。交易日默认今天、时间当日 14:30。
         """
         account = self.get_account(account_id)
         if not account:
@@ -1294,14 +1299,28 @@ class TradingStore:
         if not account["auto_reverse_repo_enabled"]:
             raise ValueError("auto reverse repo is disabled for this account")
         amount = _float(payload.get("amount"), account["unallocated_cash"])
-        annual_rate = _float(payload.get("annual_rate"), account["reverse_repo_annual_rate"])
         if amount <= 0:
             raise ValueError("amount must be positive")
         if amount > account["unallocated_cash"]:
             raise ValueError("reverse repo amount exceeds unallocated cash")
+
+        repo_symbol = (payload.get("repo_symbol") or repo.DEFAULT_SYMBOL).upper()
+        term = repo.term_days(repo_symbol)
+        rate_mode = str(payload.get("rate_mode") or "custom").lower()
+        custom_rate = _float(payload.get("annual_rate"), account["reverse_repo_annual_rate"])
+        annual_rate = custom_rate
+        rate_source = "custom"
+        if rate_mode == "market" and self.connectors:
+            quote = repo.fetch_latest_rate(self.connectors.get(payload.get("data_source")), repo_symbol)
+            if quote:
+                annual_rate = quote["annual_rate"]
+                rate_source = f"market:{repo.name_of(repo_symbol)}"
+            else:
+                rate_source = "custom(行情取不到,回退)"
+
         trade_date = str(payload.get("trade_date") or "").strip() or _today_cn()
         timestamp = payload.get("timestamp") or _trade_timestamp(trade_date, "14:30")
-        interest = round(amount * annual_rate / 365, 2)
+        interest = round(amount * annual_rate * term / 365, 2)
         self._upsert_repo_record(
             account_id=account_id,
             trade_date=trade_date,
@@ -1310,6 +1329,7 @@ class TradingStore:
             annual_rate=annual_rate,
             interest=interest,
             source=str(payload.get("source") or "manual"),
+            rate_source=rate_source,
         )
         with self._connection() as conn:
             conn.execute(
@@ -1317,7 +1337,8 @@ class TradingStore:
                 (interest, account_id),
             )
         return {"trade_date": trade_date, "timestamp": timestamp, "invest_amount": amount,
-                "annual_rate": annual_rate, "interest": interest}
+                "annual_rate": annual_rate, "interest": interest, "rate_source": rate_source,
+                "repo_symbol": repo_symbol, "term_days": term}
 
     def _upsert_repo_record(
         self,
@@ -1329,21 +1350,23 @@ class TradingStore:
         annual_rate: float,
         interest: float,
         source: str,
+        rate_source: str = "custom",
     ) -> None:
         """每账户每日一条逆回购记录(同日重复=覆盖)。"""
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO reverse_repo_records (
-                    id, account_id, trade_date, timestamp, invest_amount, annual_rate, interest, source
+                    id, account_id, trade_date, timestamp, invest_amount, annual_rate, interest, source, rate_source
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, trade_date) DO UPDATE SET
                     timestamp = excluded.timestamp,
                     invest_amount = excluded.invest_amount,
                     annual_rate = excluded.annual_rate,
                     interest = excluded.interest,
-                    source = excluded.source
+                    source = excluded.source,
+                    rate_source = excluded.rate_source
                 """,
                 (
                     f"repo_{uuid.uuid4().hex[:12]}",
@@ -1354,6 +1377,7 @@ class TradingStore:
                     annual_rate,
                     round(interest, 2),
                     source,
+                    rate_source,
                 ),
             )
 
@@ -1381,9 +1405,9 @@ class TradingStore:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO reverse_repo_records (
-                        id, account_id, trade_date, timestamp, invest_amount, annual_rate, interest, source
+                        id, account_id, trade_date, timestamp, invest_amount, annual_rate, interest, source, rate_source
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'auto')
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'auto', ?)
                     """,
                     (
                         f"repo_{uuid.uuid4().hex[:12]}",
@@ -1393,6 +1417,7 @@ class TradingStore:
                         round(float(entry.get("principal", 0.0)), 2),
                         float(entry.get("annual_rate", 0.0)),
                         interest,
+                        "market" if entry.get("rate_source") == "market" else "auto",
                         ),
                 )
                 inserted += 1

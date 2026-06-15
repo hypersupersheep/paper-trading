@@ -1749,6 +1749,7 @@ async function refreshAll(selectEventId = null) {
   await loadOrders();
   await loadEvents();
   await loadWatchlist().catch(() => {});
+  await loadRepoInstruments().catch(() => {});
   await loadReverseRepo().catch(() => {});
   await loadPerformance().catch(() => {});
   await loadBacktestRuns().catch(() => {});
@@ -1856,16 +1857,63 @@ async function handleOrderBookAction(event) {
   }
 }
 
+async function loadRepoInstruments() {
+  if ($("repoSymbol").options.length) return;
+  try {
+    const data = await fetchJson("/api/repo/instruments");
+    $("repoSymbol").innerHTML = (data.instruments || [])
+      .map((it) => `<option value="${it.symbol}">${it.name} · ${it.desc}(${it.term_days}天)</option>`)
+      .join("");
+    $("repoSymbol").value = data.default || "204001.SH";
+  } catch (error) {
+    /* 离线忽略 */
+  }
+  applyRepoRateMode();
+}
+
+// 利率来源联动:实时行情→禁用手填、拉当前利率;自定义→可手填。
+async function applyRepoRateMode() {
+  const market = $("repoRateMode").value === "market";
+  $("repoRate").disabled = market;
+  if (market) {
+    $("repoRateHint").className = "backfill-msg";
+    $("repoRateHint").textContent = "拉取实时利率…";
+    try {
+      const q = await fetchJson(
+        `/api/repo/rate?symbol=${encodeURIComponent($("repoSymbol").value)}&data_source=${encodeURIComponent(ticketSource())}`,
+      );
+      if (q.annual_rate) {
+        $("repoRate").value = q.annual_rate;
+        $("repoRateHint").className = "backfill-msg ok";
+        $("repoRateHint").textContent = `实时:${$("repoSymbol").selectedOptions[0]?.text || ""} 年化 ${formatPercent(q.annual_rate)}`;
+      } else {
+        $("repoRateHint").className = "backfill-msg err";
+        $("repoRateHint").textContent = "行情取不到该利率,执行时将回退到当前框内自定义值";
+      }
+    } catch (error) {
+      $("repoRateHint").className = "backfill-msg err";
+      $("repoRateHint").textContent = "行情取不到,回退自定义";
+    }
+  } else {
+    $("repoRateHint").className = "backfill-msg";
+    $("repoRateHint").textContent = "自定义年化利率(小数,如 0.018 = 1.8%)";
+  }
+}
+
 async function runReverseRepo(event) {
   event.preventDefault();
   const accountId = $("repoAccount").value;
   const body = {
     amount: Number($("repoAmount").value),
     annual_rate: Number($("repoRate").value),
+    rate_mode: $("repoRateMode").value,
+    repo_symbol: $("repoSymbol").value,
+    data_source: ticketSource(),
   };
   if ($("repoDate").value) body.trade_date = $("repoDate").value;
   const data = await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo`, body);
-  showToast(`逆回购已记录(${data.trade_date} 14:30)，利息 ${formatNumber(data.interest)}`);
+  const src = data.rate_source && data.rate_source.startsWith("market") ? data.rate_source : "自定义";
+  showToast(`逆回购已记录(${data.trade_date} 14:30)·年化 ${formatPercent(data.annual_rate)}(${src})·利息 ${formatNumber(data.interest)}`);
   await Promise.all([loadPortfolio(), loadReverseRepo()]);
 }
 
@@ -1887,7 +1935,7 @@ async function loadReverseRepo() {
         (r) => `
         <div class="repo-row">
           <div><strong>${r.trade_date}</strong><span>${r.source === "auto" ? "自动" : "手动"} · ${formatTime(r.timestamp).slice(11, 16)}</span></div>
-          <div><strong>${formatNumber(r.invest_amount)}</strong><span>年化 ${formatPercent(r.annual_rate)}</span></div>
+          <div><strong>${formatNumber(r.invest_amount)}</strong><span>年化 ${formatPercent(r.annual_rate)} · ${r.rate_source && r.rate_source.startsWith("market") ? "实时" : "自定义"}</span></div>
           <div class="positive"><strong>+${formatNumber(r.interest)}</strong><span>当日利息</span></div>
         </div>`,
       )
@@ -2385,6 +2433,8 @@ $("sleeveForm").addEventListener("submit", (event) => createSleeve(event).catch(
 $("orderForm").addEventListener("submit", (event) => submitOrder(event).catch((error) => showToast(error.message)));
 $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event).catch((error) => showToast(error.message)));
 $("repoForm").addEventListener("submit", (event) => runReverseRepo(event).catch((error) => showToast(error.message)));
+$("repoRateMode").addEventListener("change", () => applyRepoRateMode().catch(() => {}));
+$("repoSymbol").addEventListener("change", () => applyRepoRateMode().catch(() => {}));
 $("backfillForm").addEventListener("submit", (event) => submitBackfill(event).catch((error) => showToast(error.message)));
 $("backfillAccount").addEventListener("change", renderBackfillSleeves);
 $("deleteAccountBtn").addEventListener("click", () => deleteAccount().catch((error) => showToast(error.message)));
