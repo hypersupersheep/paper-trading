@@ -28,10 +28,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 只装打包必需的两个依赖。重数据源依赖(mootdx/pandas/rqdatac/pymysql)
-      # 已在 paper_trading.spec 的 excludes 里排除,精简版用不到,装了反而拖慢/可能失败。
+      # 完整版:装上真实数据源依赖,这样打出来的桌面 app 里通达信/米筐/wind 都能用。
+      # spec 用 find_spec 探测,装了才打进去;rqdatac 在个别 runner 上可能装不上,容错跳过即可。
       - name: Install build deps
-        run: python -m pip install --upgrade pip pywebview pyinstaller
+        run: python -m pip install --upgrade pip pywebview pyinstaller mootdx pandas numpy pymysql
+
+      - name: Install ricequant client (best-effort)
+        shell: bash
+        run: python -m pip install rqdatac || echo "rqdatac 在此 runner 安装失败,本平台的包将不含米筐(其余数据源不受影响)"
 
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --clean paper_trading.spec

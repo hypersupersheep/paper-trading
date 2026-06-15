@@ -26,15 +26,22 @@
 - Windows: `%APPDATA%\PaperTrading\`
 - Linux: `~/.local/share/PaperTrading/`
 
-## 关于数据源(重要)
+## 关于数据源:完整版 vs 精简版
 
-精简版默认**只内置 `fixture`(合成行情)**,可完整体验模拟交易/回测/绩效/agent。真实行情数据源(通达信 / 米筐 / Wind)依赖 `mootdx / rqdatac / pymysql / pandas`,这些较重,默认未打进精简包。要让打包版也能用真实数据,做"完整版":
+`paper_trading.spec` 支持两种构建,**默认完整版**:
 
-1. 编辑 `paper_trading.spec`,把 `excludes` 里相应的依赖删掉(如要通达信就移除 `"mootdx"`,要 Wind 就移除 `"pymysql"`,米筐移除 `"rqdatac"`、`"pandas"`、`"numpy"`)。
-2. 确保这些依赖已装进 `.venv`(`requirements.txt` 已列)。
-3. 重新 `./build_app.sh`。包会变大(米筐/pandas 会显著增大)。
+- **完整版(默认)**:把真实数据源依赖(`mootdx / pandas / numpy / rqdatac / pymysql`)一起打进去,桌面 app 里**通达信 / 米筐 / Wind 都能用**(米筐/Wind 仍需在数据源页填 license / VPN 凭证)。包较大(macOS 约 117MB)。前提:这些依赖已装进 `.venv`(`requirements.txt` 已列);spec 用 `find_spec` 探测,**装了才打进去,没装就自动跳过**。
+  ```bash
+  .venv/bin/pip install -r requirements.txt   # 首次,装齐数据源依赖
+  ./build_app.sh
+  ```
+- **精简版**:只内置 `fixture`(合成行情),体积小(约 28MB),适合只需演示模拟交易/回测/绩效/agent 的同事。构建时设环境变量:
+  ```bash
+  PT_LEAN=1 ./build_app.sh
+  ```
 
-> 注:用真实数据源的策略若依赖 pandas 等,也需要"完整版";精简版里这类策略会在 worker 子进程报缺依赖。
+> 注:用真实数据源的策略若依赖 pandas 等,也只有完整版能跑;精简版里这类策略会在 worker 子进程报缺依赖。
+> GitHub Actions 出的 Release 包是**完整版**(CI 会装好数据源依赖;`rqdatac` 在个别 runner 装不上时该平台的包不含米筐,其余数据源不受影响)。
 
 ## 更新策略(不丢数据)
 
