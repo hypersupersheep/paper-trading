@@ -1,5 +1,20 @@
 # 量化模拟盘 Audit & Replay Prototype
 
+A股**模拟盘(paper trading)**:风控门控、模拟撮合、回测、绩效 tearsheet、4 个行情数据源、AI/agent 接口,可打包成 macOS/Windows 桌面 app。零外部依赖(核心纯标准库),数据各自留在本机。
+
+## 快速上手
+
+**① 直接用桌面 app(同事推荐)** — 不用装 Python、不用懂代码:
+1. 打开 [Releases](https://github.com/hypersupersheep/paper-trading/releases/latest)
+2. 下对应平台的 zip:`PaperTrading-windows-*.zip`(Windows)/ `PaperTrading-macos-*.zip`(macOS)
+3. 解压,双击 `PaperTrading`(Win 是 `PaperTrading.exe`),弹出原生窗口即用。数据自动存各自用户目录,互不干扰。
+
+**② 让 AI / agent 驱动它干活** — 把仓库根目录的 [`SKILL.md`](SKILL.md) 喂给你的 agent(如 work buddy)当 skill,它就能用自然语言/代码导入策略、下单、回测、自审查。详见下方 [Agent 接入](#agent-接入p2)。
+
+**③ 从源码跑(开发)**:`python3 -m backend.server`,浏览器开 http://127.0.0.1:8000 。
+
+---
+
 这是一个零外部依赖的本地 prototype，用于验证模拟盘的 `Audit & Replay Log(审计与复盘日志)`、`paper account(模拟账户)`、`virtual sleeve(虚拟子账户)` 和 `paper broker(模拟券商)` 闭环。
 
 ## 运行
