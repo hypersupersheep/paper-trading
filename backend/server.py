@@ -143,6 +143,10 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/chart/markers":
                 self._json(self.charts.get_markers(query))
                 return
+            if path.startswith("/api/accounts/") and path.endswith("/reverse-repo"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/reverse-repo").strip("/"))
+                self._json(self.trading.list_reverse_repo(account_id))
+                return
             if path.startswith("/api/accounts/"):
                 account_id = unquote(path.removeprefix("/api/accounts/").strip("/"))
                 account = self.trading.get_account(account_id)

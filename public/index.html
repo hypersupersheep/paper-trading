@@ -335,8 +335,19 @@
             <label>投入现金<input id="repoAmount" type="number" value="1000000" /></label>
             <label>年化利率<input id="repoRate" type="number" step="0.001" value="0.018" /></label>
           </div>
-          <button class="primary" type="submit">执行逆回购</button>
+          <div class="form-grid">
+            <label>交易日(默认今天)<input id="repoDate" type="date" /></label>
+          </div>
+          <button class="primary" type="submit">执行逆回购(默认 14:30)</button>
         </form>
+
+        <div id="repoRecordsPanel" class="panel ops-panel">
+          <div class="panel-head compact">
+            <h2>逆回购记录</h2>
+            <span id="repoSummary">独立账本 · 不混入审计流水</span>
+          </div>
+          <div id="repoRecords" class="repo-records"></div>
+        </div>
 
         <form id="backfillForm" class="panel ops-panel backfill-panel">
           <div class="panel-head compact">

@@ -432,15 +432,24 @@ class TradingStoreTest(unittest.TestCase):
                 }
             )
 
-    def test_reverse_repo_adds_interest_to_unallocated_cash(self) -> None:
+    def test_reverse_repo_records_to_separate_ledger_and_adds_interest(self) -> None:
         before = self.trading.get_account("acct_test")["unallocated_cash"]
-        result = self.trading.run_reverse_repo("acct_test", {"amount": 100_000, "annual_rate": 0.018})
+        result = self.trading.run_reverse_repo(
+            "acct_test", {"amount": 100_000, "annual_rate": 0.018, "trade_date": "2024-04-01"}
+        )
         after = self.trading.get_account("acct_test")["unallocated_cash"]
 
         self.assertEqual(result["interest"], 4.93)
         self.assertEqual(round(after - before, 2), 4.93)
-        event_types = [event["event_type"] for event in self.audit.get_chain(result["source_event_id"])["cash_changes"]]
-        self.assertEqual(event_types, ["reverse_repo_invest", "reverse_repo_principal_return", "reverse_repo_interest"])
+        # 默认时间 14:30
+        self.assertEqual(result["timestamp"][11:16], "14:30")
+        # 进独立逆回购账本,不进主审计流水
+        repo = self.trading.list_reverse_repo("acct_test")
+        self.assertEqual(repo["summary"]["days"], 1)
+        self.assertEqual(repo["records"][0]["interest"], 4.93)
+        self.assertEqual(repo["records"][0]["source"], "manual")
+        repo_events = [e for e in self.audit.list_events({"account_id": "acct_test"}) if "repo" in e["event_type"]]
+        self.assertEqual(repo_events, [])
 
 
     def test_backfill_buy_updates_position_cash_and_marks_backfill(self) -> None:

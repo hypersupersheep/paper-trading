@@ -1502,6 +1502,7 @@ async function refreshAll(selectEventId = null) {
   await loadOrders();
   await loadEvents();
   await loadWatchlist().catch(() => {});
+  await loadReverseRepo().catch(() => {});
   await loadPerformance().catch(() => {});
   await loadBacktestRuns().catch(() => {});
   await loadStorageLocation().catch(() => {});
@@ -1611,16 +1612,39 @@ async function handleOrderBookAction(event) {
 async function runReverseRepo(event) {
   event.preventDefault();
   const accountId = $("repoAccount").value;
-  const data = await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo`, {
+  const body = {
     amount: Number($("repoAmount").value),
     annual_rate: Number($("repoRate").value),
-  });
-  $("accountFilter").value = accountId;
-  $("strategyFilter").value = "";
-  $("symbolFilter").value = "";
-  $("eventTypeFilter").value = "reverse_repo_interest";
-  showToast(`逆回购已记录，利息 ${formatNumber(data.interest)}`);
-  await refreshAll(data.source_event_id);
+  };
+  if ($("repoDate").value) body.trade_date = $("repoDate").value;
+  const data = await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo`, body);
+  showToast(`逆回购已记录(${data.trade_date} 14:30)，利息 ${formatNumber(data.interest)}`);
+  await Promise.all([loadPortfolio(), loadReverseRepo()]);
+}
+
+async function loadReverseRepo() {
+  const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || $("repoAccount").value;
+  if (!accountId) return;
+  let data;
+  try {
+    data = await fetchJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo`);
+  } catch (error) {
+    return;
+  }
+  const summary = data.summary || {};
+  $("repoSummary").textContent = `共 ${summary.days || 0} 日 · 累计利息 ${formatNumber(summary.total_interest || 0)}`;
+  const records = data.records || [];
+  $("repoRecords").innerHTML =
+    records
+      .map(
+        (r) => `
+        <div class="repo-row">
+          <div><strong>${r.trade_date}</strong><span>${r.source === "auto" ? "自动" : "手动"} · ${formatTime(r.timestamp).slice(11, 16)}</span></div>
+          <div><strong>${formatNumber(r.invest_amount)}</strong><span>年化 ${formatPercent(r.annual_rate)}</span></div>
+          <div class="positive"><strong>+${formatNumber(r.interest)}</strong><span>当日利息</span></div>
+        </div>`,
+      )
+      .join("") || '<div class="repo-row"><span>暂无逆回购记录</span></div>';
 }
 
 async function deleteAccount() {

@@ -1960,3 +1960,31 @@ tbody tr.selected {
   color: var(--muted);
   font-weight: 400;
 }
+
+/* 国债逆回购记录面板 */
+.repo-records {
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.repo-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+.repo-row strong {
+  display: block;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+.repo-row span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.repo-row .positive strong {
+  color: var(--gain);
+}

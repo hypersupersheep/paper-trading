@@ -146,6 +146,22 @@ class TradingStore:
                 """
             )
             self._ensure_column(conn, "sleeves", "active", "INTEGER NOT NULL DEFAULT 1")
+            # 国债逆回购独立账本:与审计流水分开,专供逆回购面板(每账户每日一条,upsert)。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reverse_repo_records (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    invest_amount REAL NOT NULL,
+                    annual_rate REAL NOT NULL,
+                    interest REAL NOT NULL,
+                    source TEXT NOT NULL,
+                    UNIQUE(account_id, trade_date)
+                )
+                """
+            )
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -1267,6 +1283,10 @@ class TradingStore:
         }
 
     def run_reverse_repo(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """手动国债逆回购:记入独立逆回购账本(不进主审计流水),利息计入未分配现金。
+
+        默认交易日=今天、时间=当日 14:30(A股逆回购常在尾盘挂单);可由 payload 覆盖。
+        """
         account = self.get_account(account_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
@@ -1278,36 +1298,82 @@ class TradingStore:
             raise ValueError("amount must be positive")
         if amount > account["unallocated_cash"]:
             raise ValueError("reverse repo amount exceeds unallocated cash")
-        timestamp = payload.get("timestamp") or _now()
-        source_event_id = f"repo_{uuid.uuid4().hex[:12]}"
-        self.audit_store.record_event(
-            AuditEvent(
-                event_id=source_event_id,
-                timestamp=timestamp,
-                ledger_type="system",
-                event_type="cash_management_scan",
-                account_id=account_id,
-                amount=amount,
-                before_state={"unallocated_cash": account["unallocated_cash"]},
-                reason="auto reverse repo requested for idle cash",
-                metadata={"annual_rate": annual_rate, "instrument": payload.get("instrument", "GC001_SIM")},
-            )
-        )
-        ids = self.audit_store.record_reverse_repo(
-            account_id=account_id,
-            timestamp=timestamp,
-            invest_cash=amount,
-            annual_rate=annual_rate,
-            cash_before=account["unallocated_cash"],
-            source_event_id=source_event_id,
-        )
+        trade_date = str(payload.get("trade_date") or "").strip() or _today_cn()
+        timestamp = payload.get("timestamp") or _trade_timestamp(trade_date, "14:30")
         interest = round(amount * annual_rate / 365, 2)
+        self._upsert_repo_record(
+            account_id=account_id,
+            trade_date=trade_date,
+            timestamp=timestamp,
+            invest_amount=amount,
+            annual_rate=annual_rate,
+            interest=interest,
+            source=str(payload.get("source") or "manual"),
+        )
         with self._connection() as conn:
             conn.execute(
                 "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
                 (interest, account_id),
             )
-        return {"source_event_id": source_event_id, "event_ids": ids, "interest": interest}
+        return {"trade_date": trade_date, "timestamp": timestamp, "invest_amount": amount,
+                "annual_rate": annual_rate, "interest": interest}
+
+    def _upsert_repo_record(
+        self,
+        *,
+        account_id: str,
+        trade_date: str,
+        timestamp: str,
+        invest_amount: float,
+        annual_rate: float,
+        interest: float,
+        source: str,
+    ) -> None:
+        """每账户每日一条逆回购记录(同日重复=覆盖)。"""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO reverse_repo_records (
+                    id, account_id, trade_date, timestamp, invest_amount, annual_rate, interest, source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, trade_date) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    invest_amount = excluded.invest_amount,
+                    annual_rate = excluded.annual_rate,
+                    interest = excluded.interest,
+                    source = excluded.source
+                """,
+                (
+                    f"repo_{uuid.uuid4().hex[:12]}",
+                    account_id,
+                    trade_date,
+                    timestamp,
+                    round(invest_amount, 2),
+                    annual_rate,
+                    round(interest, 2),
+                    source,
+                ),
+            )
+
+    def list_reverse_repo(self, account_id: str, limit: int = 750) -> dict[str, Any]:
+        """逆回购面板数据:逐日记录 + 汇总(累计投入次数、累计利息)。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reverse_repo_records WHERE account_id = ? ORDER BY trade_date DESC LIMIT ?",
+                (account_id, limit),
+            ).fetchall()
+        records = [dict(row) for row in rows]
+        total_interest = round(sum(float(r["interest"]) for r in records), 2)
+        return {
+            "account_id": account_id,
+            "records": records,
+            "summary": {
+                "days": len(records),
+                "total_interest": total_interest,
+                "last_date": records[0]["trade_date"] if records else None,
+            },
+        }
 
     def _portfolio_for_account(self, account: dict[str, Any], mark_prices: dict[str, dict[str, Any]]) -> dict[str, Any]:
         sleeves = self.list_sleeves(account["id"])
@@ -1712,6 +1778,11 @@ def _ratio(numerator: Any, denominator: Any) -> float:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _today_cn() -> str:
+    """北京时区今天的日期(YYYY-MM-DD)。"""
+    return datetime.now(CN_TZ).date().isoformat()
 
 
 CN_TZ = timezone(timedelta(hours=8))  # A 股北京时间 UTC+8
