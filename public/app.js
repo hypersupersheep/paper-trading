@@ -1107,6 +1107,7 @@ function renderAccountControls() {
   renderTimingSleeves();
   renderSchedulerSleeves();
   renderRiskSleeves();
+  updateRepoAmountDefault();
 }
 
 function renderBackfillSleeves() {
@@ -1857,6 +1858,19 @@ async function handleOrderBookAction(event) {
   }
 }
 
+// 逆回购"投入现金"默认填该账户总闲置现金(未分配 + 各 sleeve 可用),与后端口径一致。
+function accountIdleCash(account) {
+  if (!account) return 0;
+  const sleeveCash = (account.sleeves || []).reduce((s, sl) => s + Number(sl.available_cash || 0), 0);
+  return Math.floor((Number(account.unallocated_cash || 0) + sleeveCash) * 100) / 100;
+}
+
+function updateRepoAmountDefault() {
+  const account = state.accounts.find((a) => a.id === $("repoAccount").value);
+  const idle = accountIdleCash(account);
+  if (idle > 0) $("repoAmount").value = idle;
+}
+
 async function loadRepoInstruments() {
   if ($("repoSymbol").options.length) return;
   try {
@@ -2435,6 +2449,7 @@ $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event)
 $("repoForm").addEventListener("submit", (event) => runReverseRepo(event).catch((error) => showToast(error.message)));
 $("repoRateMode").addEventListener("change", () => applyRepoRateMode().catch(() => {}));
 $("repoSymbol").addEventListener("change", () => applyRepoRateMode().catch(() => {}));
+$("repoAccount").addEventListener("change", updateRepoAmountDefault);
 $("backfillForm").addEventListener("submit", (event) => submitBackfill(event).catch((error) => showToast(error.message)));
 $("backfillAccount").addEventListener("change", renderBackfillSleeves);
 $("deleteAccountBtn").addEventListener("click", () => deleteAccount().catch((error) => showToast(error.message)));

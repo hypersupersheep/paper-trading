@@ -1298,11 +1298,17 @@ class TradingStore:
             raise ValueError(f"unknown account_id: {account_id}")
         if not account["auto_reverse_repo_enabled"]:
             raise ValueError("auto reverse repo is disabled for this account")
-        amount = _float(payload.get("amount"), account["unallocated_cash"])
+        # 可投金额=账户总闲置现金(未分配 + 各 sleeve 可用现金),与自动逆回购口径一致;
+        # 否则现金都在 sleeve 里时未分配≈0,手动逆回购会误报"超出"。
+        idle_cash = round(
+            float(account["unallocated_cash"]) + sum(float(s["available_cash"]) for s in self.list_sleeves(account_id)),
+            2,
+        )
+        amount = _float(payload.get("amount"), idle_cash)
         if amount <= 0:
             raise ValueError("amount must be positive")
-        if amount > account["unallocated_cash"]:
-            raise ValueError("reverse repo amount exceeds unallocated cash")
+        if amount > idle_cash + 0.001:
+            raise ValueError(f"逆回购金额 {amount:.2f} 超过账户可用闲置现金 {idle_cash:.2f}")
 
         repo_symbol = (payload.get("repo_symbol") or repo.DEFAULT_SYMBOL).upper()
         term = repo.term_days(repo_symbol)
