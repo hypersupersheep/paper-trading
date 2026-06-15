@@ -25,6 +25,14 @@ def _as_date(value: Any) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 
+def prev_trading_day(day_str: str) -> str:
+    """给定 YYYY-MM-DD,返回前一个交易日(工作日)。用于把净值曲线锚定到首笔成交前一日。"""
+    cursor = _as_date(day_str) - timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor -= timedelta(days=1)
+    return cursor.isoformat()
+
+
 def _trading_days(start: date, end: date) -> list[date]:
     days: list[date] = []
     cursor = start

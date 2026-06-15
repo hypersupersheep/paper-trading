@@ -1988,3 +1988,42 @@ tbody tr.selected {
 .repo-row .positive strong {
   color: var(--gain);
 }
+
+/* 图表十字光标悬浮卡片(净值/回测) */
+.chart-tooltip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(22, 27, 34, 0.94);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-family: var(--mono);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  min-width: 120px;
+}
+.chart-tooltip .tt-date {
+  color: var(--muted);
+  margin-bottom: 4px;
+  font-size: 10.5px;
+}
+.chart-tooltip div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  line-height: 1.6;
+}
+.chart-tooltip span {
+  color: var(--muted);
+}
+.chart-tooltip b {
+  color: var(--text-strong);
+  font-weight: 600;
+}
+.chart-tooltip b.positive {
+  color: var(--gain);
+}
+.chart-tooltip b.negative {
+  color: var(--loss);
+}

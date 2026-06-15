@@ -17,7 +17,7 @@ from backend.backtest_store import BacktestStore
 from backend.chart_service import ChartService
 from backend.connector_settings import mask_secret, save_connector_settings
 from backend.data_connectors import normalize_frequency
-from backend.nav_reconstruction import reconstruct as reconstruct_nav
+from backend.nav_reconstruction import prev_trading_day as _prev_trading_day, reconstruct as reconstruct_nav
 from backend.performance_store import PerformanceStore, metrics_from_curve
 from backend.risk_store import RiskStore
 from backend.scheduler_store import SchedulerStore
@@ -525,8 +525,23 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         account = self.trading.get_account(account_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        recon = self._reconstruct_nav(account, query.get("data_source") or app_settings.default_data_source())
-        result = metrics_from_curve(recon["curve"], account["initial_cash"])
+        mark_source = query.get("data_source") or app_settings.default_data_source()
+        recon = self._reconstruct_nav(account, mark_source)
+        curve = recon["curve"]
+        if curve:
+            # 口径一致性:① 曲线起点锚定到初始资金(首笔成交前一交易日),累计收益对初始资金算;
+            #            ② 末点用与头部相同的实时权益,保证绩效"当前权益"与组合概览一致。
+            initial = round(float(account["initial_cash"]), 2)
+            day0 = _prev_trading_day(curve[0]["time"])
+            if day0 < curve[0]["time"]:
+                curve = [{"time": day0, "equity": initial, "cash": initial, "market_value": 0.0}, *curve]
+            try:
+                live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
+                live_equity = round(float(live["accounts"][0]["equity"]), 2)
+                curve = [*curve[:-1], {**curve[-1], "equity": live_equity}]
+            except Exception:  # noqa: BLE001 - 实时盯市失败就用重建末点,不影响展示
+                pass
+        result = metrics_from_curve(curve, account["initial_cash"])
         result["account_id"] = account_id
         result["account_name"] = account["name"]
         result["start_date"] = recon["start_date"]

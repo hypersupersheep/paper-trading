@@ -237,52 +237,131 @@ function renderPerfMetrics(data) {
       `<i><span class="dot" style="background:#2f81f7"></span>策略净值</i><i><span class="dot" style="background:#8b94a3"></span>${bench.symbol} 基准</i>`;
   } else {
     $("perfLegend").innerHTML = bench && bench.error
-      ? `<i>基准不可用：${escapeHtml(bench.error)}</i>`
-      : "<i>基准未对齐（换真实行情源可叠加沪深300）</i>";
+      ? "<i>基准不可用（通达信取不到指数日线，把右上「基准源」改为 ricequant 即可叠加沪深300，盯市也更准）</i>"
+      : "<i>基准未对齐（把「基准源」换成 ricequant 可叠加沪深300）</i>";
   }
+}
+
+// 金额简写:1.23亿 / 4560.0万 / 1234,便于 Y 轴与提示读数(学专业 tearsheet)。
+function formatWan(value) {
+  const v = Number(value) || 0;
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return (v / 1e8).toFixed(2) + "亿";
+  if (abs >= 1e4) return (v / 1e4).toFixed(1) + "万";
+  return v.toFixed(0);
+}
+
+function chartLayout(extra) {
+  return {
+    autoSize: true,
+    layout: {
+      background: { type: "solid", color: "#0e1117" },
+      textColor: "#9aa4b2",
+      fontFamily: '"SF Mono", "JetBrains Mono", monospace',
+      fontSize: 11,
+      ...extra,
+    },
+    grid: { vertLines: { color: "rgba(33,38,45,0.6)" }, horzLines: { color: "rgba(33,38,45,0.6)" } },
+    rightPriceScale: { borderColor: "#21262d", scaleMargins: { top: 0.12, bottom: 0.12 } },
+    timeScale: { borderColor: "#21262d", fixLeftEdge: true, fixRightEdge: true },
+    crosshair: {
+      mode: 1,
+      vertLine: { color: "rgba(120,130,145,0.5)", width: 1, style: 2, labelBackgroundColor: "#2f81f7" },
+      horzLine: { color: "rgba(120,130,145,0.5)", width: 1, style: 2, labelBackgroundColor: "#2f81f7" },
+    },
+  };
+}
+
+// 十字光标悬浮卡片:专业 tearsheet 的核心可读性。
+function attachChartTooltip(chart, container, render) {
+  const tip = document.createElement("div");
+  tip.className = "chart-tooltip";
+  tip.style.display = "none";
+  container.style.position = "relative";
+  container.appendChild(tip);
+  chart.subscribeCrosshairMove((param) => {
+    if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
+      tip.style.display = "none";
+      return;
+    }
+    const html = render(param);
+    if (!html) {
+      tip.style.display = "none";
+      return;
+    }
+    tip.innerHTML = html;
+    tip.style.display = "block";
+    const x = Math.min(param.point.x + 16, container.clientWidth - 150);
+    tip.style.left = Math.max(8, x) + "px";
+    tip.style.top = "8px";
+  });
 }
 
 function ensurePerfCharts() {
   if (perfCharts.equity || typeof LightweightCharts === "undefined") return;
-  const layout = {
-    autoSize: true,
-    layout: { background: { type: "solid", color: "#0e1117" }, textColor: "#7d8590", fontFamily: '"SF Mono", monospace', fontSize: 11 },
-    grid: { vertLines: { color: "#161b22" }, horzLines: { color: "#161b22" } },
-    rightPriceScale: { borderColor: "#21262d" },
-    timeScale: { borderColor: "#21262d" },
-  };
-  const equityChart = LightweightCharts.createChart($("perfEquityChart"), layout);
-  const equitySeries = equityChart.addSeries(LightweightCharts.AreaSeries, {
-    lineColor: "#2f81f7",
-    topColor: "rgba(47,129,247,0.35)",
-    bottomColor: "rgba(47,129,247,0.02)",
+  const equityChart = LightweightCharts.createChart(
+    $("perfEquityChart"),
+    chartLayout({ localization: { priceFormatter: formatWan } }),
+  );
+  // 净值用 Baseline:高于初始资金=红(盈),低于=绿(亏)——A股红涨绿跌,一眼读盈亏。
+  const equitySeries = equityChart.addSeries(LightweightCharts.BaselineSeries, {
+    baseValue: { type: "price", price: 0 },
+    topLineColor: "#f23645",
+    topFillColor1: "rgba(242,54,69,0.28)",
+    topFillColor2: "rgba(242,54,69,0.02)",
+    bottomLineColor: "#089981",
+    bottomFillColor1: "rgba(8,153,129,0.02)",
+    bottomFillColor2: "rgba(8,153,129,0.28)",
     lineWidth: 2,
-    priceFormat: { type: "price", precision: 0, minMove: 1 },
+    priceFormat: { type: "custom", formatter: formatWan, minMove: 1 },
   });
-  // 基准线(沪深300)叠加在同一价格轴上,归一化到策略起点,灰色细线。
+  // 基准线(沪深300)归一化到策略起点,灰色细虚线。
   const benchSeries = equityChart.addSeries(LightweightCharts.LineSeries, {
     color: "#8b94a3",
     lineWidth: 1,
-    priceFormat: { type: "price", precision: 0, minMove: 1 },
+    lineStyle: 2,
+    priceFormat: { type: "custom", formatter: formatWan, minMove: 1 },
     crosshairMarkerVisible: false,
+    lastValueVisible: false,
+    priceLineVisible: false,
   });
-  perfCharts.equity = { chart: equityChart, series: equitySeries, bench: benchSeries };
+  perfCharts.equity = { chart: equityChart, series: equitySeries, bench: benchSeries, base: 0 };
+  attachChartTooltip(equityChart, $("perfEquityChart"), (param) => {
+    const pt = param.seriesData.get(equitySeries);
+    if (!pt) return "";
+    const eq = pt.value;
+    const base = perfCharts.equity.base || eq;
+    const ret = base ? eq / base - 1 : 0;
+    const benchPt = param.seriesData.get(benchSeries);
+    const benchRow = benchPt ? `<div><span>基准</span><b>${formatWan(benchPt.value)}</b></div>` : "";
+    return `<div class="tt-date">${param.time}</div>
+      <div><span>净值</span><b>${formatNumber(eq)}</b></div>
+      <div><span>收益</span><b class="${ret >= 0 ? "positive" : "negative"}">${formatPercent(ret)}</b></div>${benchRow}`;
+  });
 
-  const ddChart = LightweightCharts.createChart($("perfDrawdownChart"), layout);
+  const ddChart = LightweightCharts.createChart($("perfDrawdownChart"), chartLayout());
   const ddSeries = ddChart.addSeries(LightweightCharts.AreaSeries, {
-    lineColor: "#d29922",
-    topColor: "rgba(210,153,34,0.03)",
-    bottomColor: "rgba(210,153,34,0.38)",
+    lineColor: "#e0405a",
+    topColor: "rgba(224,64,90,0.04)",
+    bottomColor: "rgba(224,64,90,0.40)",
     lineWidth: 1.5,
-    priceFormat: { type: "percent" },
+    priceFormat: { type: "custom", formatter: (v) => v.toFixed(1) + "%", minMove: 0.01 },
   });
   perfCharts.drawdown = { chart: ddChart, series: ddSeries };
+  attachChartTooltip(ddChart, $("perfDrawdownChart"), (param) => {
+    const pt = param.seriesData.get(ddSeries);
+    if (!pt) return "";
+    return `<div class="tt-date">${param.time}</div><div><span>回撤</span><b class="negative">${pt.value.toFixed(2)}%</b></div>`;
+  });
 }
 
 function renderPerfCharts(data) {
   ensurePerfCharts();
   if (!perfCharts.equity || !data) return;
   const curve = data.curve || [];
+  const base = data.metrics?.initial_cash || curve[0]?.equity || 0;
+  perfCharts.equity.base = base;
+  perfCharts.equity.series.applyOptions({ baseValue: { type: "price", price: base } });
   perfCharts.equity.series.setData(curve.map((point) => ({ time: point.time, value: point.equity })));
   perfCharts.drawdown.series.setData(curve.map((point) => ({ time: point.time, value: round2(point.drawdown * 100) })));
   const benchSeries = data.benchmark?.series || [];
@@ -406,36 +485,49 @@ function renderBacktestResult(result) {
 
 function ensureBtChart() {
   if (btChartState.chart || typeof LightweightCharts === "undefined") return;
-  const chart = LightweightCharts.createChart($("btChart"), {
-    autoSize: true,
-    layout: { background: { type: "solid", color: "#0e1117" }, textColor: "#7d8590", fontFamily: '"SF Mono", monospace', fontSize: 11 },
-    grid: { vertLines: { color: "#161b22" }, horzLines: { color: "#161b22" } },
-    rightPriceScale: { borderColor: "#21262d", scaleMargins: { top: 0.05, bottom: 0.3 } },
-    timeScale: { borderColor: "#21262d" },
-  });
-  const equity = chart.addSeries(LightweightCharts.AreaSeries, {
-    lineColor: "#2f81f7", topColor: "rgba(47,129,247,0.3)", bottomColor: "rgba(47,129,247,0.02)",
-    lineWidth: 2, priceFormat: { type: "price", precision: 0, minMove: 1 },
+  const layout = chartLayout({ localization: { priceFormatter: formatWan } });
+  layout.rightPriceScale = { borderColor: "#21262d", scaleMargins: { top: 0.08, bottom: 0.3 } };
+  const chart = LightweightCharts.createChart($("btChart"), layout);
+  const equity = chart.addSeries(LightweightCharts.BaselineSeries, {
+    baseValue: { type: "price", price: 0 },
+    topLineColor: "#f23645", topFillColor1: "rgba(242,54,69,0.26)", topFillColor2: "rgba(242,54,69,0.02)",
+    bottomLineColor: "#089981", bottomFillColor1: "rgba(8,153,129,0.02)", bottomFillColor2: "rgba(8,153,129,0.26)",
+    lineWidth: 2, priceFormat: { type: "custom", formatter: formatWan, minMove: 1 },
   });
   const bench = chart.addSeries(LightweightCharts.LineSeries, {
-    color: "#8b94a3", lineWidth: 1, priceFormat: { type: "price", precision: 0, minMove: 1 }, crosshairMarkerVisible: false,
+    color: "#8b94a3", lineWidth: 1, lineStyle: 2, priceFormat: { type: "custom", formatter: formatWan, minMove: 1 },
+    crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
   });
   // 回撤画在同一张图的底部子区(独立价格轴),"净值+基准+回撤一图看全"。
   const dd = chart.addSeries(LightweightCharts.AreaSeries, {
-    lineColor: "#d29922", topColor: "rgba(210,153,34,0.02)", bottomColor: "rgba(210,153,34,0.4)",
-    lineWidth: 1, priceScaleId: "dd", priceFormat: { type: "percent" },
+    lineColor: "#e0405a", topColor: "rgba(224,64,90,0.02)", bottomColor: "rgba(224,64,90,0.4)",
+    lineWidth: 1, priceScaleId: "dd", priceFormat: { type: "custom", formatter: (v) => v.toFixed(1) + "%", minMove: 0.01 },
   });
   dd.priceScale().applyOptions({ scaleMargins: { top: 0.78, bottom: 0 } });
   btChartState.chart = chart;
   btChartState.equity = equity;
   btChartState.bench = bench;
   btChartState.dd = dd;
+  btChartState.base = 0;
+  attachChartTooltip(chart, $("btChart"), (param) => {
+    const pt = param.seriesData.get(equity);
+    if (!pt) return "";
+    const base = btChartState.base || pt.value;
+    const ddPt = param.seriesData.get(dd);
+    const ddRow = ddPt ? `<div><span>回撤</span><b class="negative">${ddPt.value.toFixed(2)}%</b></div>` : "";
+    return `<div class="tt-date">${param.time}</div>
+      <div><span>净值</span><b>${formatNumber(pt.value)}</b></div>
+      <div><span>收益</span><b class="${pt.value >= base ? "positive" : "negative"}">${formatPercent(base ? pt.value / base - 1 : 0)}</b></div>${ddRow}`;
+  });
 }
 
 function renderBtChart(result) {
   ensureBtChart();
   if (!btChartState.chart || !result) return;
   const curve = result.curve || [];
+  const base = result.summary?.initial_cash || curve[0]?.equity || 0;
+  btChartState.base = base;
+  btChartState.equity.applyOptions({ baseValue: { type: "price", price: base } });
   btChartState.equity.setData(curve.map((point) => ({ time: point.time, value: point.equity })));
   btChartState.dd.setData(curve.map((point) => ({ time: point.time, value: round2((point.drawdown || 0) * 100) })));
   const benchSeries = result.benchmark?.series || [];

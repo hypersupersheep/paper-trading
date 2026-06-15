@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.nav_reconstruction import reconstruct
+from backend.nav_reconstruction import prev_trading_day, reconstruct
 
 
 class NavReconstructionTest(unittest.TestCase):
@@ -62,6 +62,11 @@ class NavReconstructionTest(unittest.TestCase):
         self.assertEqual(fri["trade_date"], "2024-01-05")
         # 周五利息按 3 天计:999000*0.018*3/365
         self.assertEqual(fri["interest"], round(999_000 * 0.018 * 3 / 365, 2))
+
+
+    def test_prev_trading_day_skips_weekend(self) -> None:
+        self.assertEqual(prev_trading_day("2024-01-09"), "2024-01-08")  # 周二 -> 周一
+        self.assertEqual(prev_trading_day("2024-01-08"), "2024-01-05")  # 周一 -> 上周五
 
 
 if __name__ == "__main__":
