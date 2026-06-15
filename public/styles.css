@@ -169,6 +169,7 @@ nav button.active {
   background: var(--accent-soft);
   color: var(--accent-strong);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent-strong);
 }
 
 .account-box {
@@ -428,25 +429,7 @@ select option {
   margin-bottom: 14px;
 }
 
-.metrics div {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-.metrics span {
-  display: block;
-  color: var(--muted);
-  font-size: 11.5px;
-  margin-bottom: 8px;
-}
-
-.metrics strong {
-  font-family: var(--mono);
-  font-size: 22px;
-  color: var(--text-strong);
-}
+/* 指标卡的样式统一在文件后部"统一指标卡"处定义(概览 + 绩效共用) */
 
 .portfolio-panel {
   margin-bottom: 14px;
@@ -1492,30 +1475,9 @@ tbody tr.selected {
   gap: 14px;
 }
 
+/* 绩效指标:分组纵向堆叠(每组整行),组内卡片横向铺满 → 用满宽度。 */
 .perf-metrics {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.perf-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-.perf-card span {
   display: block;
-  color: var(--muted);
-  font-size: 11.5px;
-  margin-bottom: 8px;
-}
-
-.perf-card strong {
-  font-family: var(--mono);
-  font-size: 20px;
-  color: var(--text-strong);
 }
 
 .perf-chart-panel .panel-head button {
@@ -2062,20 +2024,59 @@ tbody tr.selected {
 
 /* 绩效指标分组(收益/风险/相对基准) */
 .perf-group {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 .perf-group h4 {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
   color: var(--muted);
   text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.perf-group h4::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 .perf-group .perf-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 10px;
+}
+
+/* 统一指标卡(概览 + 绩效):紧凑、微弱景深、悬停高亮 */
+.perf-card,
+.metrics div {
+  background: linear-gradient(180deg, var(--surface), var(--surface-2));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  transition: border-color 0.12s ease;
+}
+.perf-card:hover,
+.metrics div:hover {
+  border-color: #2d3647;
+}
+.perf-card span,
+.metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.2px;
+  margin-bottom: 6px;
+}
+.perf-card strong,
+.metrics strong {
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: var(--text-strong);
 }
 
 /* 月度收益热力图 */

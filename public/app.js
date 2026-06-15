@@ -32,15 +32,15 @@ const state = {
 
 // 侧边栏导航：每个 data-view 区块属于一个视图，切换时只显示当前视图。
 const VIEW_META = {
-  overview: ["组合概览", "账户净值、sleeve 表现与持仓一览"],
-  performance: ["绩效分析", "净值曲线 · 回撤 · 夏普/年化/最大回撤/胜率等量化指标"],
-  backtest: ["策略回测", "选策略+区间+摩擦+基准 → 一键回测，出净值/基准/回撤一张图与全套指标"],
-  strategy: ["策略工作台", "导入 Python 选股策略，连接行情回放运行"],
-  timing: ["择时工作台", "导入择时策略，绑定 gate 控制选股策略开仓"],
-  trading: ["模拟交易", "账户、资金分配、市价/限价下单、风控与订单簿"],
-  scheduler: ["实时调度", "按交易时段轮询执行 择时 → 选股 → broker → 审计"],
-  replay: ["Audit & Replay Log", "复盘信号、择时门控、风控、订单、成交、现金、持仓和净值变化"],
-  data: ["数据源", "行情 connector 健康状态与实时行情快照"],
+  overview: ["组合概览", "账户净值 · sleeve 表现 · 持仓"],
+  performance: ["绩效分析", "净值 · 回撤 · 滚动夏普 · 月度收益"],
+  backtest: ["策略回测", "选策略 · 区间 · 摩擦 · 基准 → 一键回测"],
+  strategy: ["策略工作台", "导入 Python 选股策略并回放运行"],
+  timing: ["择时工作台", "导入择时策略,gate 控制选股开仓"],
+  trading: ["模拟交易", "账户 · 资金 · 下单 · 风控 · 订单簿"],
+  scheduler: ["实时调度", "按交易时段轮询:择时 → 选股 → broker → 审计"],
+  replay: ["Audit & Replay Log", "信号 → 择时 → 风控 → 订单 → 成交 → 现金 → 持仓 → 净值"],
+  data: ["数据源", "connector 健康状态与实时行情快照"],
 };
 
 function switchView(view) {
