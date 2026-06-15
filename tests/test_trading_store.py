@@ -557,6 +557,41 @@ class TradingStoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.trading.delete_account("acct_nope")
 
+    def test_backfill_without_sleeve_uses_existing_default(self) -> None:
+        # 账户已有一个 sleeve(setUp 建的),不指定 sleeve_id 应自动落到它,不新建。
+        result = self.trading.backfill_trade(
+            {
+                "account_id": "acct_test",
+                "symbol": "600519.SH",
+                "side": "BUY",
+                "quantity": 100,
+                "price": 100,
+                "trade_date": "2024-02-05",
+            }
+        )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(len(self.trading.list_sleeves("acct_test")), 1)
+        position = self.trading.list_positions("sleeve_test")[0]
+        self.assertEqual(position["quantity"], 100)
+
+    def test_backfill_auto_creates_main_sleeve_when_none(self) -> None:
+        # 全新账户、无 sleeve:补录时自动建"主仓"并落账,agent 无需关心 sleeve。
+        self.trading.create_account({"id": "acct_bare", "name": "Bare", "initial_cash": 500_000})
+        result = self.trading.backfill_trade(
+            {
+                "account_id": "acct_bare",
+                "symbol": "000001.SZ",
+                "side": "BUY",
+                "quantity": 200,
+                "price": 12,
+                "trade_date": "2024-03-01",
+            }
+        )
+        self.assertTrue(result["accepted"])
+        sleeves = self.trading.list_sleeves("acct_bare")
+        self.assertEqual(len(sleeves), 1)
+        self.assertEqual(sleeves[0]["name"], "主仓")
+
 
 if __name__ == "__main__":
     unittest.main()

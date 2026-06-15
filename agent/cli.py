@@ -164,12 +164,12 @@ def cmd_delete_account(args, pt):
 def cmd_backfill(args, pt):
     data = pt.backfill_trade(
         args.account_id,
-        args.sleeve_id,
         args.symbol,
         args.side.upper(),
         args.quantity,
         args.price,
         args.date,
+        sleeve_id=args.sleeve_id,
         trade_time=args.time,
         apply_fees=not args.no_fees,
         note=args.note,
@@ -257,7 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backfill", help="交易历史补充:补录此前未记录的历史成交(只补历史,勿造正常交易)")
     p.add_argument("--account-id", required=True)
-    p.add_argument("--sleeve-id", required=True)
+    p.add_argument("--sleeve-id", help="可省略;不传则用账户默认 sleeve(没有就自动建主仓)")
     p.add_argument("--symbol", required=True, help="如 600519.SH")
     p.add_argument("--side", required=True, choices=["BUY", "SELL", "buy", "sell"])
     p.add_argument("--quantity", type=int, required=True)

@@ -121,28 +121,31 @@ class PaperTradingClient:
     def backfill_trade(
         self,
         account_id: str,
-        sleeve_id: str,
         symbol: str,
         side: str,
         quantity: int,
         price: float,
         trade_date: str,
+        *,
+        sleeve_id: str | None = None,
         **opts: Any,
     ) -> dict:
         """交易历史补充:补录此前未记录的真实历史成交(symbol/price/side/quantity/trade_date 必填)。
 
+        sleeve_id 可省略——不传则落到账户默认 sleeve(没有就自动建"主仓"),单账户补录无需关心 sleeve。
         绕过择时/风控门控,但保持账本一致。仅用于补历史,不要用它造正常交易。
         opts 可带 trade_time(HH:MM)、apply_fees(默认 True)、note。
         """
         body = {
             "account_id": account_id,
-            "sleeve_id": sleeve_id,
             "symbol": symbol,
             "side": side,
             "quantity": quantity,
             "price": price,
             "trade_date": trade_date,
         }
+        if sleeve_id:
+            body["sleeve_id"] = sleeve_id
         body.update(opts)
         return self._post("/api/broker/backfill", body)
 

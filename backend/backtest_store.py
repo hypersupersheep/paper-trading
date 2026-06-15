@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import friction as friction_model
 from backend.data_connectors import normalize_frequency
 from backend.performance_store import benchmark_overlay, metrics_from_curve
 
@@ -73,10 +74,11 @@ class BacktestStore:
         if initial_cash <= 0:
             raise ValueError("initial_cash must be positive")
         friction = {
-            "commission_rate": _float(payload.get("commission_rate"), 0.00025),
+            "commission_rate": _float(payload.get("commission_rate"), 0.00008),
             "min_commission": _float(payload.get("min_commission"), 5.0),
-            "stamp_duty_rate": _float(payload.get("stamp_duty_rate"), 0.0005),
-            "slippage_value": _float(payload.get("slippage_value"), 2.0),
+            "stamp_duty_rate": _float(payload.get("stamp_duty_rate"), 0.001),
+            "slippage_model": payload.get("slippage_model") or "adaptive",
+            "slippage_value": _float(payload.get("slippage_value"), 1.0),
         }
 
         connector = self.connectors.get(data_source)
@@ -101,7 +103,7 @@ class BacktestStore:
         # 1) 选股策略信号
         account = {"id": "bt_account", "name": "Backtest", "commission_rate": friction["commission_rate"],
                    "min_commission": friction["min_commission"], "stamp_duty_rate": friction["stamp_duty_rate"],
-                   "slippage_model": "bps", "slippage_value": friction["slippage_value"]}
+                   "slippage_model": friction["slippage_model"], "slippage_value": friction["slippage_value"]}
         sleeve = {"id": "bt_sleeve", "name": "Backtest", "strategy_id": strategy_id,
                   "allocated_cash": initial_cash, "available_cash": initial_cash, "positions": []}
         worker = self.strategy_store._run_worker(strategy, account, sleeve, bars, frequency, "bt_strategy")
@@ -233,10 +235,22 @@ class BacktestStore:
         curve: dict[str, dict[str, Any]] = {}  # 按交易日折叠,保留每日最后净值
         trades: list[dict[str, Any]] = []
         rejected = 0
+        slippage_model = friction.get("slippage_model", "adaptive")
+        # 每标的已见过的 bar 历史:自适应滑点据此估 ADV/σ(只用截至当前 ts 的,无前视)。
+        symbol_history: dict[str, list[dict[str, Any]]] = {}
+
+        def _slip(sym: str, qty: float, px: float) -> float:
+            ref = symbol_history.get(sym, [])[-friction_model.DEFAULT_ADV_WINDOW:]
+            return friction_model.slippage_cost(
+                slippage_model, quantity=qty, fill_price=px,
+                slippage_value=friction["slippage_value"], ref_bars=ref,
+            )
 
         for ts in timestamps:
             for bar in bars_by_ts.get(ts, []):
-                last_close[str(bar["symbol"]).upper()] = float(bar["close"])
+                sym = str(bar["symbol"]).upper()
+                last_close[sym] = float(bar["close"])
+                symbol_history.setdefault(sym, []).append(bar)
 
             for order in orders_by_ts.get(ts, []):
                 symbol = str(order["symbol"]).upper()
@@ -248,7 +262,7 @@ class BacktestStore:
                     continue
                 gross = quantity * price
                 commission = max(round(gross * friction["commission_rate"], 2), friction["min_commission"])
-                slippage = round(gross * friction["slippage_value"] / 10_000, 2)
+                slippage = _slip(symbol, quantity, price)
 
                 if side == "BUY":
                     if not gate_allows(ts):
@@ -274,7 +288,7 @@ class BacktestStore:
                     sell_gross = sell_qty * price
                     sell_commission = max(round(sell_gross * friction["commission_rate"], 2), friction["min_commission"])
                     stamp = round(sell_gross * friction["stamp_duty_rate"], 2)
-                    sell_slippage = round(sell_gross * friction["slippage_value"] / 10_000, 2)
+                    sell_slippage = _slip(symbol, sell_qty, price)
                     proceeds = sell_gross - sell_commission - stamp - sell_slippage
                     realized = round((price - position["cost"]) * sell_qty - sell_commission - stamp - sell_slippage, 2)
                     cash += proceeds

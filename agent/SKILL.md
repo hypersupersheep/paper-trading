@@ -10,7 +10,8 @@ Drive a local A-share **paper trading** system. It simulates strategies like liv
 ## Core Facts
 
 - **Local only**: server runs at `http://127.0.0.1:8000` (override with `--base-url` or `PAPER_TRADING_URL`). Start it with `python3 -m backend.server` from the app directory.
-- **Simulation, not real money**: orders go to a paper broker (friction modeled: commission/stamp duty/slippage; A-share 100-share lots; T+1 in backtests).
+- **Simulation, not real money**: orders go to a paper broker. Friction defaults: commission 万0.8 (0.00008, both sides), stamp duty 千1 (0.001, sell only), **adaptive slippage** (square-root market-impact model `η·σ·√(order/ADV)`, applied in both backtest and live). All friction is per-account/per-backtest overridable (`slippage_model` can be `adaptive`/`bps`/`fixed_tick`). A-share 100-share lots; T+1 in backtests.
+- **Sleeve is optional for trading/backfill**: `sleeve_id` can be omitted — the system uses the account's default sleeve, or auto-creates a "主仓" one. Only create/specify sleeves when you actually run multiple strategies in one account (sleeve = per-strategy capital bucket + P&L attribution).
 - **Discover first**: `GET /api/meta` returns version, `api_version`, `data_home`, data sources, and a capabilities map. Always check it before acting (the SDK's `check_compatible()` does this).
 - **Data isolation**: all writable data lives under `PAPER_TRADING_HOME` (default = app dir). Each user/instance can have its own.
 - **Data sources**: `fixture`(synthetic, for testing), `tongdaxin`(realtime A-share via mootdx), `ricequant`(米筐 rqdatac, best for historical date ranges), `wind`(辉隆 Wind read-only MySQL, daily only, needs内网 VPN). Historical backtests need a real source with the date range; `fixture` works for any range but is synthetic.

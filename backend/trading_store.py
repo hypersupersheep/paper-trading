@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import friction
 from backend.audit_store import AuditEvent, AuditStore
 from backend.data_connectors import normalize_frequency
 
@@ -18,11 +19,11 @@ DEFAULT_ACCOUNT = {
     "initial_cash": 10_000_000.0,
     "currency": "CNY",
     "market": "CN_A",
-    "commission_rate": 0.00025,
+    "commission_rate": 0.00008,
     "min_commission": 5.0,
-    "stamp_duty_rate": 0.0005,
-    "slippage_model": "bps",
-    "slippage_value": 2.0,
+    "stamp_duty_rate": 0.001,
+    "slippage_model": "adaptive",
+    "slippage_value": 1.0,
     "auto_reverse_repo_enabled": 1,
     "reverse_repo_annual_rate": 0.018,
 }
@@ -206,19 +207,19 @@ class TradingStore:
             "unallocated_cash": initial_cash,
             "currency": payload.get("currency") or "CNY",
             "market": payload.get("market") or "CN_A",
-            "commission_rate": _float(payload.get("commission_rate"), 0.00025),
+            "commission_rate": _float(payload.get("commission_rate"), 0.00008),
             "min_commission": _float(payload.get("min_commission"), 5.0),
-            "stamp_duty_rate": _float(payload.get("stamp_duty_rate"), 0.0005),
-            "slippage_model": payload.get("slippage_model") or "bps",
-            "slippage_value": _float(payload.get("slippage_value"), 2.0),
+            "stamp_duty_rate": _float(payload.get("stamp_duty_rate"), 0.001),
+            "slippage_model": payload.get("slippage_model") or "adaptive",
+            "slippage_value": _float(payload.get("slippage_value"), 1.0),
             "auto_reverse_repo_enabled": 1 if payload.get("auto_reverse_repo_enabled", True) else 0,
             "reverse_repo_annual_rate": _float(payload.get("reverse_repo_annual_rate"), 0.018),
             "created_at": payload.get("created_at") or now,
         }
         if account["initial_cash"] <= 0:
             raise ValueError("initial_cash must be positive")
-        if account["slippage_model"] not in {"bps", "fixed_tick"}:
-            raise ValueError("slippage_model must be bps or fixed_tick")
+        if account["slippage_model"] not in {"bps", "fixed_tick", "adaptive"}:
+            raise ValueError("slippage_model must be bps, fixed_tick or adaptive")
 
         with self._connection() as conn:
             conn.execute(
@@ -615,9 +616,32 @@ class TradingStore:
         )
         return {"cancelled": True, "order": self.get_order(order_id), "event_id": event_id}
 
+    def _resolve_default_sleeve(self, account_id: str) -> str:
+        """返回该账户可用于下单/补录的默认 sleeve;没有就建一个"主仓"(吃下当前未分配现金)。
+
+        让 agent / 单策略用户不必关心 sleeve:不指定 sleeve_id 时自动落到这里。
+        只有真要在一个账户里跑多策略时,才需要显式建/选 sleeve。
+        """
+        sleeves = self.list_sleeves(account_id)
+        if sleeves:
+            return sleeves[0]["id"]
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"unknown account_id: {account_id}")
+        cash = float(account["unallocated_cash"])
+        if cash <= 0:
+            raise ValueError(
+                f"账户 {account_id} 没有 sleeve 且无可分配现金,无法自动建默认 sleeve;请先手动创建。"
+            )
+        sleeve = self.create_sleeve(
+            account_id,
+            {"name": "主仓", "strategy_id": "manual", "allocated_cash": cash},
+        )
+        return sleeve["id"]
+
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         account_id = _required(payload, "account_id")
-        sleeve_id = _required(payload, "sleeve_id")
+        sleeve_id = payload.get("sleeve_id") or self._resolve_default_sleeve(account_id)
         symbol = _required(payload, "symbol").upper()
         side = _required(payload, "side").upper()
         quantity = int(_float(payload.get("quantity"), 0.0))
@@ -864,7 +888,7 @@ class TradingStore:
         if fill_quantity == 0:
             commission = 0.0
         stamp_duty = round(gross_amount * account["stamp_duty_rate"], 2) if side == "SELL" else 0.0
-        slippage_cost = self._slippage_cost(account, fill_quantity, fill_price)
+        slippage_cost = self._slippage_cost(account, symbol, fill_quantity, fill_price, payload)
         total_cost = round(commission + stamp_duty + slippage_cost, 2)
         cash_delta = -gross_amount - total_cost if side == "BUY" else gross_amount - total_cost
 
@@ -1064,7 +1088,7 @@ class TradingStore:
         正常模拟交易不应走这里;此功能只用于补历史,除回测外不要用它造交易。
         """
         account_id = _required(payload, "account_id")
-        sleeve_id = _required(payload, "sleeve_id")
+        sleeve_id = payload.get("sleeve_id") or self._resolve_default_sleeve(account_id)
         symbol = _required(payload, "symbol").upper()
         side = _required(payload, "side").upper()
         trade_date = _required(payload, "trade_date")
@@ -1570,11 +1594,33 @@ class TradingStore:
             raise ValueError(f"invalid market price for {symbol} from {data_source}")
         return close
 
-    @staticmethod
-    def _slippage_cost(account: dict[str, Any], quantity: int, price: float) -> float:
-        if account["slippage_model"] == "bps":
-            return round(quantity * price * account["slippage_value"] / 10_000, 2)
-        return round(quantity * account["slippage_value"], 2)
+    def _slippage_cost(
+        self,
+        account: dict[str, Any],
+        symbol: str,
+        quantity: int,
+        price: float,
+        payload: dict[str, Any],
+    ) -> float:
+        model = account.get("slippage_model", "adaptive")
+        ref_bars = None
+        # 自适应模型需要近段日频 bar 估 ADV/σ;固定 ADV 用日频,和回测口径一致。
+        if model == "adaptive" and self.connectors:
+            try:
+                data_source = payload.get("data_source") or "fixture"
+                connector = self.connectors.get(data_source)
+                bars = connector.get_bars([symbol], frequency="1d", limit=friction.DEFAULT_ADV_WINDOW)
+                ref_bars = [bar for bar in bars if str(bar.get("symbol", "")).upper() == symbol]
+                ref_bars.sort(key=lambda bar: str(bar.get("timestamp") or ""))
+            except Exception:
+                ref_bars = None  # 取不到行情就让 friction 退化为温和固定 bps
+        return friction.slippage_cost(
+            model,
+            quantity=quantity,
+            fill_price=price,
+            slippage_value=account["slippage_value"],
+            ref_bars=ref_bars,
+        )
 
 
 def _row(row: sqlite3.Row) -> dict[str, Any]:

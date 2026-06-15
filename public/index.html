@@ -169,9 +169,10 @@
             <label>开始日期<input id="btStart" type="date" /></label>
             <label>结束日期<input id="btEnd" type="date" /></label>
             <label>初始资金<input id="btInitialCash" type="number" value="1000000" /></label>
-            <label>手续费率<input id="btCommission" type="number" step="0.00001" value="0.00025" /></label>
-            <label>印花税率<input id="btStamp" type="number" step="0.0001" value="0.0005" /></label>
-            <label>滑点 bps<input id="btSlippage" type="number" step="0.1" value="2" /></label>
+            <label>佣金率(双边)<input id="btCommission" type="number" step="0.00001" value="0.00008" /></label>
+            <label>印花税率(卖出)<input id="btStamp" type="number" step="0.0001" value="0.001" /></label>
+            <label>滑点模型<select id="btSlippageModel"><option value="adaptive">自适应(冲击)</option><option value="bps">固定 bps</option></select></label>
+            <label>滑点强度 η<input id="btSlippage" type="number" step="0.1" value="1" /></label>
             <label>基准代码<input id="btBenchmark" value="000300.SH" /></label>
             <label>基准源<select id="btBenchSource"></select></label>
           </div>
@@ -295,9 +296,10 @@
           <div class="form-grid">
             <label>账户名<input id="newAccountName" value="A-Share Test" /></label>
             <label>初始资金<input id="newInitialCash" type="number" value="10000000" /></label>
-            <label>手续费率<input id="newCommissionRate" type="number" step="0.00001" value="0.00025" /></label>
-            <label>印花税率<input id="newStampDutyRate" type="number" step="0.0001" value="0.0005" /></label>
-            <label>滑点 bps<input id="newSlippageValue" type="number" step="0.1" value="2" /></label>
+            <label>佣金率(双边)<input id="newCommissionRate" type="number" step="0.00001" value="0.00008" /></label>
+            <label>印花税率(卖出)<input id="newStampDutyRate" type="number" step="0.0001" value="0.001" /></label>
+            <label>滑点模型<select id="newSlippageModel"><option value="adaptive">自适应(冲击)</option><option value="bps">固定 bps</option><option value="fixed_tick">每股固定</option></select></label>
+            <label>滑点强度 η<input id="newSlippageValue" type="number" step="0.1" value="1" /></label>
             <label>逆回购年化<input id="newRepoRate" type="number" step="0.001" value="0.018" /></label>
           </div>
           <button class="primary" type="submit">创建账户</button>
