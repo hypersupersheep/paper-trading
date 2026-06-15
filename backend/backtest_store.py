@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import app_settings
 from backend import friction as friction_model
 from backend.data_connectors import normalize_frequency
 from backend.performance_store import benchmark_overlay, metrics_from_curve
@@ -67,7 +68,7 @@ class BacktestStore:
 
         symbols = _symbols(payload.get("symbols") or ["000001.SZ"])
         frequency = normalize_frequency(payload.get("frequency") or "1d")
-        data_source = (payload.get("data_source") or "fixture").lower()
+        data_source = (payload.get("data_source") or app_settings.default_data_source()).lower()
         start = (payload.get("start") or "").strip() or None
         end = (payload.get("end") or "").strip() or None
         initial_cash = _float(payload.get("initial_cash"), 1_000_000.0)

@@ -145,6 +145,13 @@ async function loadStrategies() {
   state.runs = data.runs;
   const connectorData = await fetchJson("/api/data/connectors/health");
   state.connectors = connectorData.connectors;
+  if (state.defaultDataSource === undefined) {
+    try {
+      state.defaultDataSource = (await fetchJson("/api/settings/data-source")).default_data_source;
+    } catch (error) {
+      state.defaultDataSource = "tongdaxin";
+    }
+  }
   renderStrategyControls();
 }
 
@@ -470,8 +477,20 @@ function exportBacktest(format) {
 }
 
 // ============================ 交易工作区 ============================
+// 全站所有"数据源/基准源"下拉的 id(默认数据源选择器除外)。一键全改时统一设置这些。
+const DATA_SOURCE_SELECTS = [
+  "strategyDataSource", "chartDataSource", "portfolioDataSource", "orderDataSource",
+  "perfBenchSource", "btDataSource", "btBenchSource", "quoteDataSource",
+  "timingRunDataSource", "schedulerDataSource",
+];
+
+function effectiveDefaultSource() {
+  return state.defaultDataSource || "tongdaxin";
+}
+
 function ticketSource() {
-  return localStorage.getItem(DEFAULT_SOURCE_KEY) || "fixture";
+  // 交易票据/盯市用全局默认数据源(各视图下拉若用户单独改过,以各自下拉为准)。
+  return effectiveDefaultSource();
 }
 
 async function loadWatchlist() {
@@ -710,11 +729,11 @@ function renderDataConnectors() {
 
 function renderDefaultSourceSelect() {
   const select = $("defaultDataSource");
-  const saved = localStorage.getItem(DEFAULT_SOURCE_KEY) || "fixture";
+  const current = effectiveDefaultSource();
   select.innerHTML = state.connectors
-    .map((connector) => `<option value="${connector.name}">${connector.name}</option>`)
+    .map((connector) => `<option value="${connector.name}">${connector.name} · ${connectorStatusLabel(connector.status)}</option>`)
     .join("");
-  if (state.connectors.some((connector) => connector.name === saved)) select.value = saved;
+  if (state.connectors.some((connector) => connector.name === current)) select.value = current;
 }
 
 async function saveWindConfig() {
@@ -957,10 +976,10 @@ function renderSchedulerSleeves() {
 
 const DEFAULT_SOURCE_KEY = "pt_default_data_source";
 
-// 全站数据源下拉统一填充：保留用户已选值，否则用「默认数据源」偏好。
+// 全站数据源下拉统一填充：保留用户已选值，否则用全局「默认数据源」。
 function fillConnectorSelect(id) {
   const select = $(id);
-  const previous = select.value || localStorage.getItem(DEFAULT_SOURCE_KEY) || "";
+  const previous = select.value || effectiveDefaultSource();
   select.innerHTML = state.connectors
     .map((connector) => `<option value="${connector.name}">${connector.name} · ${connectorStatusLabel(connector.status)}</option>`)
     .join("");
@@ -985,7 +1004,7 @@ function renderStrategyControls() {
     ? state.strategies.map((strategy) => `<option value="${strategy.id}">${strategy.name}</option>`).join("")
     : '<option value="">先导入选股策略</option>';
   if (previousBt) $("btStrategy").value = previousBt;
-  for (const id of ["strategyDataSource", "chartDataSource", "portfolioDataSource", "orderDataSource", "perfBenchSource", "btDataSource", "btBenchSource"]) {
+  for (const id of DATA_SOURCE_SELECTS) {
     fillConnectorSelect(id);
   }
   renderDataConnectors();
@@ -2122,10 +2141,21 @@ $("dataConnectors").addEventListener("click", (event) => {
     saveWindConfig().catch((error) => showToast(error.message));
   }
 });
-$("defaultDataSource").addEventListener("change", (event) => {
-  localStorage.setItem(DEFAULT_SOURCE_KEY, event.target.value);
-  showToast(`默认数据源已设为 ${event.target.value}，新打开的下拉框会自动预选`);
-});
+$("defaultDataSource").addEventListener("change", (event) =>
+  setDefaultDataSource(event.target.value).catch((error) => showToast(error.message)),
+);
+
+async function setDefaultDataSource(source) {
+  // 持久化到服务端(后端各接口随之跟随),并一键把全站所有数据源下拉改成它。
+  await postJson("/api/settings/data-source", { default_data_source: source });
+  state.defaultDataSource = source;
+  for (const id of DATA_SOURCE_SELECTS) {
+    if (state.connectors.some((c) => c.name === source)) $(id).value = source;
+  }
+  showToast(`默认数据源已一键设为 ${source}（各板块仍可单独覆盖）`);
+  // 用新数据源刷新依赖行情的视图。
+  await refreshAll().catch(() => {});
+}
 $("strategyBoard").addEventListener("click", (event) => handleStrategyBoardAction(event).catch((error) => showToast(error.message)));
 $("loadQuote").addEventListener("click", () => loadQuote().catch((error) => showToast(error.message)));
 $("storagePick").addEventListener("click", () => handleStoragePick().catch((error) => showToast(error.message)));

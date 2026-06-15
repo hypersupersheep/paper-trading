@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from backend import app_settings
 from backend import names as security_names
 from backend import paths
 from backend.audit_store import AuditEvent, LEDGER_TYPES, AuditStore
@@ -62,6 +63,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings/data-location":
                 self._json(self._data_location())
+                return
+            if path == "/api/settings/data-source":
+                self._json({"default_data_source": app_settings.default_data_source(), "data_sources": self.strategies.connectors.names()})
                 return
             if path == "/api/accounts":
                 self._json({"accounts": self.trading.list_accounts()})
@@ -223,6 +227,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 paths.clear_home_pointer()
                 self._json({"ok": True, "restart_required": True, "default": str(self._default_home())}, HTTPStatus.CREATED)
                 return
+            if path == "/api/settings/data-source":
+                self._json(app_settings.set_default_data_source(payload.get("default_data_source")), HTTPStatus.CREATED)
+                return
             if path == "/api/portfolio/snapshot":
                 self._json(self._record_snapshot(payload), HTTPStatus.CREATED)
                 return
@@ -290,7 +297,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 account = self.trading.get_account(account_id)
                 if not account:
                     raise ValueError(f"unknown account_id: {account_id}")
-                recon = self._reconstruct_nav(account, payload.get("data_source") or "fixture")
+                recon = self._reconstruct_nav(account, payload.get("data_source") or app_settings.default_data_source())
                 self._json(self.trading.sync_auto_repo(account_id, recon["repo_schedule"]), HTTPStatus.CREATED)
                 return
             if path.startswith("/api/accounts/") and path.endswith("/reverse-repo"):
@@ -414,6 +421,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "data_home": str(paths.home()),
             "data_sources": self.strategies.connectors.names(),
+            "default_data_source": app_settings.default_data_source(),
             "capabilities": {
                 "accounts": True,
                 "sleeves": True,
@@ -495,7 +503,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         if fills and symbols:
             start_date = min(str(f["timestamp"])[:10] for f in fills)
             try:
-                connector = self.strategies.connectors.get(data_source or "fixture")
+                connector = self.strategies.connectors.get(data_source or app_settings.default_data_source())
                 bars = connector.get_bars(symbols, frequency="1d", limit=2000, start=start_date, end=today)
                 for bar in bars:
                     sym = str(bar["symbol"]).upper()
@@ -517,7 +525,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         account = self.trading.get_account(account_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        recon = self._reconstruct_nav(account, query.get("data_source") or "fixture")
+        recon = self._reconstruct_nav(account, query.get("data_source") or app_settings.default_data_source())
         result = metrics_from_curve(recon["curve"], account["initial_cash"])
         result["account_id"] = account_id
         result["account_name"] = account["name"]
@@ -532,7 +540,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         result["benchmark"] = None
         if result.get("curve") and len(result["curve"]) >= 3:
             try:
-                connector = self.strategies.connectors.get(query.get("benchmark_source") or query.get("data_source") or "fixture")
+                connector = self.strategies.connectors.get(query.get("benchmark_source") or query.get("data_source") or app_settings.default_data_source())
                 bench_bars = connector.get_bars([benchmark_symbol], frequency="1d", limit=len(result["curve"]) + 30)
                 result["benchmark"] = self.performance.compute_benchmark(result["curve"], bench_bars, benchmark_symbol)
             except Exception as exc:  # noqa: BLE001 - 基准失败不影响策略绩效展示。
@@ -561,7 +569,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         if not clean:
             return []
         freq = normalize_frequency(frequency or "1d")
-        source = (data_source or "fixture").lower()
+        source = (data_source or app_settings.default_data_source()).lower()
         connector = self.strategies.connectors.get(source)
         try:
             bars = connector.get_bars(clean, frequency=freq, limit=2)

@@ -73,6 +73,33 @@ class DataConnectorTest(unittest.TestCase):
         self.assertIn("tongdaxin", health)
         self.assertIn(health["tongdaxin"]["status"], {"ok", "unavailable"})
 
+    def test_tongdaxin_get_names_maps_code_to_name(self) -> None:
+        import types
+
+        import pandas as pd
+
+        from backend.data_connectors import TongDaXinDataConnector
+
+        sh = pd.DataFrame([{"code": "600229", "name": "城市传媒"}, {"code": "600519", "name": "贵州茅台"}])
+
+        class _Client:
+            def stocks(self, market):
+                return sh if market == 1 else pd.DataFrame([], columns=["code", "name"])
+
+        fake = types.SimpleNamespace(Quotes=types.SimpleNamespace(factory=lambda **kw: _Client()))
+        connector = TongDaXinDataConnector()
+        connector._import_mootdx = lambda: fake  # type: ignore[assignment]
+
+        names = connector.get_names(["600229.SH", "600519.SH"])
+        self.assertEqual(names, {"600229.SH": "城市传媒", "600519.SH": "贵州茅台"})
+
+    def test_tongdaxin_get_names_swallows_errors(self) -> None:
+        from backend.data_connectors import TongDaXinDataConnector
+
+        connector = TongDaXinDataConnector()
+        connector._import_mootdx = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
+        self.assertEqual(connector.get_names(["600229.SH"]), {})
+
 
 if __name__ == "__main__":
     unittest.main()

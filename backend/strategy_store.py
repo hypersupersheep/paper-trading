@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import app_settings
 from backend.audit_store import AuditEvent, AuditStore
 from backend.data_connectors import DataConnectorRegistry, normalize_frequency
 from backend.strategy_adapter import adapt_strategy_code
@@ -185,7 +186,7 @@ class StrategyStore:
             symbols = [item.strip().upper() for item in symbols.split(",") if item.strip()]
         symbols = [str(symbol).upper() for symbol in symbols]
         frequency = normalize_frequency(payload.get("frequency") or "5m")
-        data_source = (payload.get("data_source") or "fixture").lower()
+        data_source = (payload.get("data_source") or app_settings.default_data_source()).lower()
         provided_bars = payload.get("bars")
         if provided_bars is not None:
             bars = _provided_bars(provided_bars)

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import app_settings
 from backend import friction
 from backend import names as security_names
 from backend.audit_store import AuditEvent, AuditStore
@@ -667,11 +668,11 @@ class TradingStore:
         if signal_price <= 0 and self.connectors:
             # 市价单语义：客户端不报价时，按 connector 最新 close 定价。
             signal_price = self._latest_close(
-                payload.get("data_source") or "fixture",
+                payload.get("data_source") or app_settings.default_data_source(),
                 symbol,
                 payload.get("frequency") or "5m",
             )
-            price_source = f"{(payload.get('data_source') or 'fixture').lower()}_close"
+            price_source = f"{(payload.get('data_source') or app_settings.default_data_source()).lower()}_close"
         fill_price = _float(payload.get("fill_price"), signal_price)
         timestamp = payload.get("timestamp") or _now()
         strategy_id = payload.get("strategy_id") or "manual_strategy"
@@ -1722,7 +1723,7 @@ class TradingStore:
         # 自适应模型需要近段日频 bar 估 ADV/σ;固定 ADV 用日频,和回测口径一致。
         if model == "adaptive" and self.connectors:
             try:
-                data_source = payload.get("data_source") or "fixture"
+                data_source = payload.get("data_source") or app_settings.default_data_source()
                 connector = self.connectors.get(data_source)
                 bars = connector.get_bars([symbol], frequency="1d", limit=friction.DEFAULT_ADV_WINDOW)
                 ref_bars = [bar for bar in bars if str(bar.get("symbol", "")).upper() == symbol]

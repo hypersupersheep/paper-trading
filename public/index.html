@@ -571,7 +571,7 @@ def on_bar(ctx, bar):
         <div class="data-actions">
           <button id="refreshConnectors" class="primary" type="button">刷新状态</button>
           <label class="default-source">默认数据源<select id="defaultDataSource"></select></label>
-          <span class="data-hint">fixture 为内置测试行情；tongdaxin 免密钥拉 A 股实时 K 线；ricequant 输入密钥后台自动连接。默认数据源会预选到全站所有数据源下拉框。</span>
+          <span class="data-hint">fixture 为内置测试行情；tongdaxin 免密钥拉 A 股实时 K 线；ricequant 输入密钥后台自动连接。改默认数据源会<strong>一键把全站所有视图(含后端接口)切到它</strong>；各板块仍可单独覆盖(如默认通达信、回测单独选 wind)。</span>
         </div>
       </section>
 

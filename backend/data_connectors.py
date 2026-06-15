@@ -121,6 +121,37 @@ class TongDaXinDataConnector:
 
     def __init__(self, home_dir: str | Path | None = None):
         self.home_dir = Path(home_dir) if home_dir else Path(tempfile.gettempdir()) / "paper-trading-tdx-home"
+        # 会话级名称目录:{market_int: {code6: name}},首次拉取后缓存,避免每次取名都拉全市场。
+        self._name_catalog: dict[int, dict[str, str]] = {}
+
+    def get_names(self, symbols: list[str]) -> dict[str, str]:
+        """用 mootdx 的全市场证券表取个股中文名(SH=market 1, SZ=market 0)。失败返回空,绝不抛错。"""
+        if not symbols:
+            return {}
+        try:
+            quotes_module = self._import_mootdx()
+            client = quotes_module.Quotes.factory(market="std", server=("110.41.147.114", 7709), timeout=10)
+            result: dict[str, str] = {}
+            for symbol in symbols:
+                code, suffix = _split_symbol(symbol)
+                market = 1 if suffix == "SH" else 0
+                catalog = self._market_catalog(client, market)
+                name = catalog.get(code)
+                if name:
+                    result[f"{code}.{suffix}"] = name
+            return result
+        except Exception:
+            return {}
+
+    def _market_catalog(self, client: Any, market: int) -> dict[str, str]:
+        if market not in self._name_catalog:
+            frame = client.stocks(market=market)
+            catalog: dict[str, str] = {}
+            if hasattr(frame, "to_dict"):
+                for rec in frame[["code", "name"]].to_dict("records"):
+                    catalog[str(rec["code"])] = str(rec["name"]).strip()
+            self._name_catalog[market] = catalog
+        return self._name_catalog[market]
 
     def healthcheck(self) -> dict[str, Any]:
         try:
@@ -476,7 +507,12 @@ class DataConnectorRegistry:
         return list(self._connectors.keys())
 
     def get(self, name: str | None):
-        connector_name = (name or "fixture").lower()
+        # 未指定时回退到全局默认数据源(用户在数据源页设的;代码默认 tongdaxin)。
+        if not name:
+            from backend import app_settings
+
+            name = app_settings.default_data_source()
+        connector_name = str(name).lower()
         if connector_name not in self._connectors:
             raise ValueError(f"unknown data source: {connector_name}")
         return self._connectors[connector_name]
@@ -562,6 +598,14 @@ def _base_price(symbol: str) -> float:
 def _tdx_symbol(symbol: str) -> str:
     code = symbol.upper().split(".")[0]
     return code
+
+
+def _split_symbol(symbol: str) -> tuple[str, str]:
+    """600229.SH → ("600229", "SH");没带后缀按 6 开头沪市、其余深市推断。"""
+    code, _, market = str(symbol).upper().partition(".")
+    if market not in {"SH", "SZ"}:
+        market = "SH" if code.startswith("6") else "SZ"
+    return code, market
 
 
 def _rq_symbol(symbol: str) -> str:

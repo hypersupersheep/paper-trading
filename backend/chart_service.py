@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend import app_settings
 from backend.audit_store import AuditStore
 from backend.data_connectors import DataConnectorRegistry, normalize_frequency
 
@@ -14,7 +15,7 @@ class ChartService:
     def get_bars(self, query: dict[str, str | None]) -> dict[str, Any]:
         symbol = _required(query, "symbol").upper()
         frequency = normalize_frequency(query.get("frequency") or "5m")
-        data_source = (query.get("data_source") or "fixture").lower()
+        data_source = (query.get("data_source") or app_settings.default_data_source()).lower()
         limit = min(max(int(query.get("limit") or 80), 1), 800)
         connector = self.connectors.get(data_source)
         bars = connector.get_bars([symbol], frequency=frequency, limit=limit)

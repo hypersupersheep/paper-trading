@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from backend import app_settings
 from backend.audit_store import AuditEvent, AuditStore
 from backend.data_connectors import normalize_frequency
 from backend.strategy_store import StrategyStore
@@ -193,7 +194,7 @@ class SchedulerStore:
             "sleeve_id": sleeve_id,
             "strategy_id": strategy_id,
             "timing_strategy_id": timing_strategy_id,
-            "data_source": (payload.get("data_source") or "fixture").lower(),
+            "data_source": (payload.get("data_source") or app_settings.default_data_source()).lower(),
             "symbols": symbols,
             "frequency": frequency,
             "interval_seconds": interval_seconds,
