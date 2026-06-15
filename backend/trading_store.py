@@ -988,6 +988,195 @@ class TradingStore:
             },
         }
 
+    def backfill_trade(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """交易历史补充：仅用于补录此前未被系统记录的【真实历史成交】。
+
+        与正常策略下单(place_order)的关键区别——本方法**绕过择时/风控/sleeve停用门控**,
+        因为补录的是已经发生的既成事实,而不是一笔新决策;但它仍然严格维护账本一致性
+        (现金、持仓数量、持仓成本),并给每条补录打上 backfill 标记写入审计链,便于和正常
+        策略流水区分。
+
+        严格门槛:symbol、price、side、quantity、trade_date 缺一不可,否则拒绝使用。
+        正常模拟交易不应走这里;此功能只用于补历史,除回测外不要用它造交易。
+        """
+        account_id = _required(payload, "account_id")
+        sleeve_id = _required(payload, "sleeve_id")
+        symbol = _required(payload, "symbol").upper()
+        side = _required(payload, "side").upper()
+        trade_date = _required(payload, "trade_date")
+        # 价格、数量必须显式声明:补录里没有"市价自动定价"这种语义。
+        if payload.get("price") in (None, ""):
+            raise ValueError("price is required: 交易历史补充必须声明成交价格")
+        if payload.get("quantity") in (None, ""):
+            raise ValueError("quantity is required: 交易历史补充必须声明成交数量")
+        price = float(payload["price"])
+        quantity = int(_float(payload.get("quantity"), 0.0))
+        apply_fees = bool(payload.get("apply_fees", True))
+        note = str(payload.get("note") or "").strip()
+
+        if side not in {"BUY", "SELL"}:
+            raise ValueError("side must be BUY or SELL")
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        if price <= 0:
+            raise ValueError("price must be positive")
+        timestamp = _trade_timestamp(trade_date, payload.get("trade_time"))
+
+        account = self.get_account(account_id)
+        sleeve = self.get_sleeve(sleeve_id)
+        if not account:
+            raise ValueError(f"unknown account_id: {account_id}")
+        if not sleeve or sleeve["account_id"] != account_id:
+            raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
+
+        position = self._get_position(account_id, sleeve_id, symbol)
+        position_before = int(position["quantity"]) if position else 0
+        avg_cost_before = float(position["avg_cost"]) if position else 0.0
+        available_cash = float(sleeve["available_cash"])
+
+        # 一致性:卖出不能超过当前持仓(否则会造出负持仓)。提示用户先按时间顺序补买入。
+        if side == "SELL" and quantity > position_before:
+            raise ValueError(
+                f"补录卖出 {quantity} 股,但该 sleeve 当前仅持有 {symbol} {position_before} 股;"
+                f"请先按时间顺序补录对应的买入。"
+            )
+
+        gross_amount = round(quantity * price, 2)
+        commission = stamp_duty = 0.0
+        if apply_fees:
+            commission = max(round(gross_amount * account["commission_rate"], 2), account["min_commission"])
+            stamp_duty = round(gross_amount * account["stamp_duty_rate"], 2) if side == "SELL" else 0.0
+        slippage_cost = 0.0  # 补录的是真实成交价,不再叠加滑点模型
+        total_cost = round(commission + stamp_duty + slippage_cost, 2)
+        cash_delta = -gross_amount - total_cost if side == "BUY" else gross_amount - total_cost
+
+        if side == "BUY" and available_cash + cash_delta < -0.001:
+            raise ValueError(
+                f"补录买入需现金 {gross_amount + total_cost:.2f},但该 sleeve 可用现金仅 {available_cash:.2f};"
+                f"请调整 sleeve 资金或核对补录数据。"
+            )
+
+        if side == "BUY":
+            position_after = position_before + quantity
+            avg_cost_after = round(((position_before * avg_cost_before) + (quantity * price)) / position_after, 4)
+        else:
+            position_after = position_before - quantity
+            avg_cost_after = 0.0 if position_after == 0 else avg_cost_before
+
+        strategy_id = "manual_backfill"
+        run_id = payload.get("run_id") or f"backfill_{str(trade_date).replace('-', '')}_{uuid.uuid4().hex[:6]}"
+        order_id = payload.get("order_id") or f"bf_{uuid.uuid4().hex[:12]}"
+        source_event_id = f"bf_sig_{uuid.uuid4().hex[:12]}"
+        backfill_meta = {"backfill": True, "note": note, "apply_fees": apply_fees}
+
+        # 1) 补录声明事件:作为这条历史成交审计链的根。
+        self.audit_store.record_event(
+            AuditEvent(
+                event_id=source_event_id,
+                timestamp=timestamp,
+                ledger_type="decision",
+                event_type="trade_backfill_declared",
+                account_id=account_id,
+                sleeve_id=sleeve_id,
+                strategy_id=strategy_id,
+                run_id=run_id,
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                reason=note or "manual historical trade backfill",
+                metadata={**backfill_meta, "side": side},
+            )
+        )
+        # 2) 订单记录:直接置为 filled,order_type 标 backfill 以便 blotter 一眼识别。
+        self._create_order_record(
+            order_id=order_id,
+            source_event_id=source_event_id,
+            account_id=account_id,
+            sleeve_id=sleeve_id,
+            strategy_id=strategy_id,
+            run_id=run_id,
+            symbol=symbol,
+            side=side,
+            order_type="backfill",
+            time_in_force="GTC",
+            quantity=quantity,
+            signal_price=price,
+            limit_price=None,
+            timestamp=timestamp,
+            reason="historical trade backfilled",
+            metadata=backfill_meta,
+        )
+        # 3) 结算:复用与正常成交相同的审计拆分(现金本金/佣金/印花税/持仓)。
+        self.audit_store.record_trade_settlement(
+            account_id=account_id,
+            sleeve_id=sleeve_id,
+            strategy_id=strategy_id,
+            run_id=run_id,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=price,
+            timestamp=timestamp,
+            source_event_id=source_event_id,
+            cash_before=available_cash,
+            position_before=position_before,
+            avg_cost_before=avg_cost_before,
+            avg_cost_after=avg_cost_after,
+            commission=commission,
+            stamp_duty=stamp_duty,
+            slippage_cost=slippage_cost,
+        )
+        self._update_order_status(
+            order_id,
+            status="filled",
+            filled_quantity=quantity,
+            last_fill_price=price,
+            timestamp=timestamp,
+            reason="historical trade backfilled",
+        )
+
+        # 4) 落地持仓与 sleeve 现金(与 place_order 成交路径一致)。
+        available_cash_after = round(available_cash + cash_delta, 2)
+        with self._connection() as conn:
+            conn.execute("UPDATE sleeves SET available_cash = ? WHERE id = ?", (available_cash_after, sleeve_id))
+            if position_after == 0:
+                conn.execute(
+                    "DELETE FROM positions WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
+                    (account_id, sleeve_id, symbol),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO positions (
+                        account_id, sleeve_id, symbol, quantity, avg_cost, last_price, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, sleeve_id, symbol)
+                    DO UPDATE SET
+                        quantity = excluded.quantity,
+                        avg_cost = excluded.avg_cost,
+                        last_price = excluded.last_price,
+                        updated_at = excluded.updated_at
+                    """,
+                    (account_id, sleeve_id, symbol, position_after, avg_cost_after, price, timestamp),
+                )
+
+        return {
+            "accepted": True,
+            "backfill": True,
+            "order_id": order_id,
+            "source_event_id": source_event_id,
+            "timestamp": timestamp,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "cash_after": available_cash_after,
+            "position_after": position_after,
+            "avg_cost_after": avg_cost_after,
+            "costs": {"commission": commission, "stamp_duty": stamp_duty, "slippage": slippage_cost},
+        }
+
     def run_reverse_repo(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         account = self.get_account(account_id)
         if not account:
@@ -1411,6 +1600,34 @@ def _ratio(numerator: Any, denominator: Any) -> float:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _trade_timestamp(trade_date: Any, trade_time: Any) -> str:
+    """把用户声明的历史日期(至少 YYYY-MM-DD)+ 可选时间(HH:MM[:SS])转成带时区的 ISO 时间戳。
+
+    交易历史补充只要求精确到日期;不给具体时间时,按当日 15:00(A股收盘附近)记,
+    方便与日线对齐排序。
+    """
+    date_str = str(trade_date).strip()
+    try:
+        base = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("trade_date 必须是 YYYY-MM-DD 格式(至少精确到日期)") from exc
+
+    if trade_time in (None, ""):
+        base = base.replace(hour=15, minute=0, second=0)
+    else:
+        parsed = None
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                parsed = datetime.strptime(str(trade_time).strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            raise ValueError("trade_time 必须是 HH:MM 或 HH:MM:SS 格式")
+        base = base.replace(hour=parsed.hour, minute=parsed.minute, second=parsed.second)
+    return base.replace(tzinfo=timezone.utc).isoformat()
 
 
 def _required(payload: dict[str, Any], key: str) -> str:

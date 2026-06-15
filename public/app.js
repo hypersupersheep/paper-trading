@@ -840,6 +840,7 @@ function renderAccountControls() {
     "sleeveAccount",
     "orderAccount",
     "repoAccount",
+    "backfillAccount",
     "strategyRunAccount",
     "timingBindAccount",
     "timingRunAccount",
@@ -857,10 +858,21 @@ function renderAccountControls() {
   const activeAccount = $("accountFilter").value.trim() || state.accounts[0]?.id;
   if (activeAccount && state.accounts.some((account) => account.id === activeAccount)) topSelect.value = activeAccount;
   renderSleeveOptions();
+  renderBackfillSleeves();
   renderStrategyRunSleeves();
   renderTimingSleeves();
   renderSchedulerSleeves();
   renderRiskSleeves();
+}
+
+function renderBackfillSleeves() {
+  const accountId = $("backfillAccount").value || state.accounts[0]?.id;
+  const account = state.accounts.find((item) => item.id === accountId);
+  const previous = $("backfillSleeve").value;
+  $("backfillSleeve").innerHTML = (account?.sleeves || [])
+    .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${formatNumber(sleeve.available_cash)} cash</option>`)
+    .join("");
+  if (previous) $("backfillSleeve").value = previous;
 }
 
 function updateTicker(account) {
@@ -1609,6 +1621,45 @@ async function runReverseRepo(event) {
   await refreshAll(data.source_event_id);
 }
 
+async function submitBackfill(event) {
+  event.preventDefault();
+  const msg = $("backfillMsg");
+  const accountId = $("backfillAccount").value;
+  const sleeveId = $("backfillSleeve").value;
+  const symbol = $("backfillSymbol").value.trim().toUpperCase();
+  const price = Number($("backfillPrice").value);
+  const quantity = Number($("backfillQuantity").value);
+  const tradeDate = $("backfillDate").value;
+  // 前端先做"缺一不可"的硬校验,与后端一致。
+  if (!symbol || !price || !quantity || !tradeDate) {
+    msg.className = "backfill-msg err";
+    msg.textContent = "代码、价格、数量、日期必填,缺一不可。";
+    return;
+  }
+  try {
+    const data = await postJson("/api/broker/backfill", {
+      account_id: accountId,
+      sleeve_id: sleeveId,
+      symbol,
+      side: $("backfillSide").value,
+      quantity,
+      price,
+      trade_date: tradeDate,
+      trade_time: $("backfillTime").value || undefined,
+      apply_fees: $("backfillApplyFees").checked,
+      note: $("backfillNote").value.trim(),
+    });
+    msg.className = "backfill-msg ok";
+    msg.textContent = `已补录 ${data.side} ${data.symbol} ${data.quantity}@${data.price}（${data.timestamp.slice(0, 10)}）· 持仓 ${data.position_after}`;
+    showToast("历史成交已补录");
+    $("accountFilter").value = accountId;
+    await refreshAll(data.source_event_id);
+  } catch (error) {
+    msg.className = "backfill-msg err";
+    msg.textContent = error.message;
+  }
+}
+
 async function importStrategy(event) {
   event.preventDefault();
   const data = await postJson("/api/strategies", {
@@ -2029,6 +2080,8 @@ $("sleeveForm").addEventListener("submit", (event) => createSleeve(event).catch(
 $("orderForm").addEventListener("submit", (event) => submitOrder(event).catch((error) => showToast(error.message)));
 $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event).catch((error) => showToast(error.message)));
 $("repoForm").addEventListener("submit", (event) => runReverseRepo(event).catch((error) => showToast(error.message)));
+$("backfillForm").addEventListener("submit", (event) => submitBackfill(event).catch((error) => showToast(error.message)));
+$("backfillAccount").addEventListener("change", renderBackfillSleeves);
 $("strategyFile").addEventListener("change", (event) =>
   loadPythonFile(event, {
     textareaId: "strategyCode",

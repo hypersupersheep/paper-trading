@@ -153,6 +153,30 @@ def cmd_quotes(args, pt):
     )
 
 
+def cmd_backfill(args, pt):
+    data = pt.backfill_trade(
+        args.account_id,
+        args.sleeve_id,
+        args.symbol,
+        args.side.upper(),
+        args.quantity,
+        args.price,
+        args.date,
+        trade_time=args.time,
+        apply_fees=not args.no_fees,
+        note=args.note,
+    )
+    if args.json:
+        return data
+    costs = data.get("costs", {})
+    return (
+        f"已补录 {data['side']} {data['symbol']} {data['quantity']}@{data['price']}  "
+        f"日期 {data['timestamp'][:10]}\n"
+        f"  持仓 -> {data['position_after']} · sleeve 现金 -> {data['cash_after']:,.2f} · "
+        f"佣金 {costs.get('commission', 0):.2f} 印花税 {costs.get('stamp_duty', 0):.2f}"
+    )
+
+
 def _summarize_backtest(result: dict) -> str:
     s = result.get("summary", {})
     m = result.get("metrics", {})
@@ -217,6 +241,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", help="审查一个已存在的回测")
     p.add_argument("--backtest-id", required=True)
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("backfill", help="交易历史补充:补录此前未记录的历史成交(只补历史,勿造正常交易)")
+    p.add_argument("--account-id", required=True)
+    p.add_argument("--sleeve-id", required=True)
+    p.add_argument("--symbol", required=True, help="如 600519.SH")
+    p.add_argument("--side", required=True, choices=["BUY", "SELL", "buy", "sell"])
+    p.add_argument("--quantity", type=int, required=True)
+    p.add_argument("--price", type=float, required=True, help="真实成交价")
+    p.add_argument("--date", required=True, help="成交日期 YYYY-MM-DD(至少到日)")
+    p.add_argument("--time", help="可选成交时间 HH:MM")
+    p.add_argument("--no-fees", action="store_true", help="不计佣金/印花税,只按本金调整")
+    p.add_argument("--note", default="", help="备注")
+    p.set_defaults(func=cmd_backfill)
 
     p = sub.add_parser("performance", help="账户绩效")
     p.add_argument("--account-id")

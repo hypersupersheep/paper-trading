@@ -114,6 +114,34 @@ class PaperTradingClient:
     def cancel_order(self, order_id: str, reason: str = "cancelled by agent") -> dict:
         return self._post(f"/api/broker/orders/{order_id}/cancel", {"reason": reason})
 
+    def backfill_trade(
+        self,
+        account_id: str,
+        sleeve_id: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        trade_date: str,
+        **opts: Any,
+    ) -> dict:
+        """交易历史补充:补录此前未记录的真实历史成交(symbol/price/side/quantity/trade_date 必填)。
+
+        绕过择时/风控门控,但保持账本一致。仅用于补历史,不要用它造正常交易。
+        opts 可带 trade_time(HH:MM)、apply_fees(默认 True)、note。
+        """
+        body = {
+            "account_id": account_id,
+            "sleeve_id": sleeve_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "trade_date": trade_date,
+        }
+        body.update(opts)
+        return self._post("/api/broker/backfill", body)
+
     def list_orders(self, **filters: Any) -> list[dict]:
         return self._get("/api/broker/orders", **filters)["orders"]
 

@@ -329,6 +329,28 @@
           </div>
           <button class="primary" type="submit">执行逆回购</button>
         </form>
+
+        <form id="backfillForm" class="panel ops-panel backfill-panel">
+          <div class="panel-head compact">
+            <h2>交易历史补充</h2>
+            <span>Trade Backfill · 仅补录历史</span>
+          </div>
+          <p class="backfill-warn">仅用于补录此前未记录的真实历史成交。绕过择时/风控门控但保持账本一致;正常模拟交易请用上方交易下单,勿用此功能造交易。代码、价格、数量、日期必填。</p>
+          <div class="form-grid">
+            <label>账户<select id="backfillAccount"></select></label>
+            <label>Sleeve<select id="backfillSleeve"></select></label>
+            <label>方向<select id="backfillSide"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
+            <label>代码<input id="backfillSymbol" placeholder="如 600519.SH" /></label>
+            <label>成交价<input id="backfillPrice" type="number" step="0.01" placeholder="真实成交价" /></label>
+            <label>数量（股）<input id="backfillQuantity" type="number" step="100" placeholder="必填" /></label>
+            <label>成交日期<input id="backfillDate" type="date" /></label>
+            <label>时间（可选）<input id="backfillTime" type="time" /></label>
+            <label class="check-row"><input id="backfillApplyFees" type="checkbox" checked />计佣金/印花税</label>
+            <label>备注<input id="backfillNote" placeholder="可选" /></label>
+          </div>
+          <button class="primary" type="submit">补录这笔历史成交</button>
+          <div id="backfillMsg" class="backfill-msg"></div>
+        </form>
       </section>
 
       <section class="risk-workbench" data-view="trading">

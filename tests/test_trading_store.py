@@ -443,5 +443,89 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(event_types, ["reverse_repo_invest", "reverse_repo_principal_return", "reverse_repo_interest"])
 
 
+    def test_backfill_buy_updates_position_cash_and_marks_backfill(self) -> None:
+        cash_before = self.trading.get_sleeve("sleeve_test")["available_cash"]
+        result = self.trading.backfill_trade(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "symbol": "600519.SH",
+                "side": "BUY",
+                "quantity": 200,
+                "price": 100,
+                "trade_date": "2024-03-01",
+            }
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["backfill"])
+        self.assertEqual(result["timestamp"][:10], "2024-03-01")
+
+        position = self.trading.list_positions("sleeve_test")[0]
+        self.assertEqual(position["quantity"], 200)
+        self.assertEqual(position["avg_cost"], 100)
+
+        # 现金 = 之前 - 本金 20000 - 佣金(20000*0.001=20)
+        cash_after = self.trading.get_sleeve("sleeve_test")["available_cash"]
+        self.assertEqual(round(cash_before - cash_after, 2), 20_020.0)
+
+        # 订单被标为 backfill,审计链根是补录声明事件
+        order = self.trading.get_order(result["order_id"])
+        self.assertEqual(order["order_type"], "backfill")
+        self.assertEqual(order["status"], "filled")
+        self.assertTrue(order["metadata"]["backfill"])
+        chain = self.audit.get_chain(result["source_event_id"])
+        self.assertIn("trade_backfill_declared", [e["event_type"] for e in chain["all_events"]])
+        self.assertEqual(chain["trade"]["event_type"], "trade_filled")
+
+    def test_backfill_requires_price_and_quantity(self) -> None:
+        base = {
+            "account_id": "acct_test",
+            "sleeve_id": "sleeve_test",
+            "symbol": "600519.SH",
+            "side": "BUY",
+            "trade_date": "2024-03-01",
+        }
+        with self.assertRaises(ValueError):
+            self.trading.backfill_trade({**base, "quantity": 100})  # 缺 price
+        with self.assertRaises(ValueError):
+            self.trading.backfill_trade({**base, "price": 100})  # 缺 quantity
+        with self.assertRaises(ValueError):
+            self.trading.backfill_trade({**base, "price": 100, "quantity": 100, "trade_date": ""})  # 缺日期
+
+    def test_backfill_sell_cannot_exceed_position(self) -> None:
+        with self.assertRaises(ValueError):
+            self.trading.backfill_trade(
+                {
+                    "account_id": "acct_test",
+                    "sleeve_id": "sleeve_test",
+                    "symbol": "600519.SH",
+                    "side": "SELL",
+                    "quantity": 100,
+                    "price": 100,
+                    "trade_date": "2024-03-01",
+                }
+            )
+
+    def test_backfill_skips_risk_and_timing_gates(self) -> None:
+        # 即便不带任何择时/风控字段,补录也应直接成交(它绕过门控)。
+        result = self.trading.backfill_trade(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "symbol": "000001.SZ",
+                "side": "BUY",
+                "quantity": 300,
+                "price": 12.5,
+                "trade_date": "2023-12-15",
+                "trade_time": "10:30",
+                "apply_fees": False,
+            }
+        )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["costs"]["commission"], 0.0)
+        self.assertEqual(result["timestamp"][11:16], "10:30")
+
+
 if __name__ == "__main__":
     unittest.main()

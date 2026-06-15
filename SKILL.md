@@ -96,6 +96,7 @@ GET  /api/meta                         能力发现(先调这个)
 GET|POST /api/accounts                 账户
 POST /api/accounts/{id}/sleeves        资金单元
 POST /api/broker/orders                下单
+POST /api/broker/backfill              交易历史补充(补录历史成交,见下文)
 GET|POST /api/strategies               选股策略(POST=导入)
 POST /api/strategies/{id}/run          运行策略
 POST /api/strategies/{id}/delete       删除策略
@@ -109,6 +110,24 @@ GET  /api/quotes?symbols=...           批量行情
 GET  /api/audit/chain/{event_id}       审计链路
 GET  /api/data/connectors/health       数据源状态
 ```
+
+## Trade backfill 交易历史补充 (补录历史成交)
+
+Only for recording **real historical trades that the system never logged** — not for normal trading. It bypasses the timing/risk/sleeve gates (the trade already happened, it's not a new decision) but still keeps the ledger consistent (cash, position quantity, avg cost) and tags every entry as a backfill on the audit chain.
+
+- **Strictly required**: `symbol`, `price`, `side`, `quantity`, `trade_date` (`YYYY-MM-DD`, at least date-level). Missing any → rejected.
+- Optional: `trade_time` (`HH:MM`), `apply_fees` (default true → applies commission + stamp duty, no slippage), `note`.
+- Consistency: a SELL cannot exceed the current position (backfill the matching BUY first, in chronological order); a BUY needs sufficient sleeve cash.
+- Do **not** use this to fabricate normal trades — only to fill gaps. For live paper trading use `place_order`; for what-if testing use backtest.
+
+```bash
+python3 agent/cli.py backfill \
+  --account-id acct_x --sleeve-id sleeve_x \
+  --symbol 600519.SH --side BUY --quantity 200 --price 1500 \
+  --date 2024-02-05 --note "历史漏记的建仓"
+```
+
+SDK: `pt.backfill_trade(account_id, sleeve_id, symbol, side, quantity, price, trade_date, trade_time=..., apply_fees=..., note=...)`. HTTP: `POST /api/broker/backfill`.
 
 ## Conventions & gotchas
 

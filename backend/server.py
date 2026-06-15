@@ -285,6 +285,10 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/broker/orders":
                 self._json(self.trading.place_order(payload), HTTPStatus.CREATED)
                 return
+            if path == "/api/broker/backfill":
+                # 交易历史补充:仅补录历史成交,绕过门控但保持账本一致(见 TradingStore.backfill_trade)。
+                self._json(self.trading.backfill_trade(payload), HTTPStatus.CREATED)
+                return
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -389,6 +393,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "benchmark_overlay": True,
                 "watchlist": True,
                 "audit_chain": True,
+                "trade_backfill": True,
                 "export": ["csv", "json"],
             },
             # agent 发现用的主端点目录(按域分组);详细参数见 skill/README。
@@ -396,6 +401,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "meta": "GET /api/meta",
                 "accounts": "GET|POST /api/accounts",
                 "place_order": "POST /api/broker/orders",
+                "trade_backfill": "POST /api/broker/backfill",
                 "strategies": "GET|POST /api/strategies",
                 "run_strategy": "POST /api/strategies/{id}/run",
                 "timing_strategies": "GET|POST /api/timing-strategies",
