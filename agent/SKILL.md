@@ -106,8 +106,11 @@ GET|POST /api/timing-strategies        择时策略
 POST /api/backtest/run                 跑回测(返回 curve/metrics/benchmark/trades/summary)
 GET  /api/backtest/runs                历史回测
 GET  /api/backtest/{id}/export?format=csv|json   下载
-GET  /api/portfolio/performance        绩效 tearsheet(可带 ?benchmark=&benchmark_source=)
+GET  /api/portfolio/performance        绩效 tearsheet(净值曲线从账本重建,从首笔成交起;?data_source= 盯市/?benchmark=)
 GET  /api/portfolio/summary            组合盯市
+GET  /api/accounts/{id}/reverse-repo            国债逆回购记录(独立账本,不在主审计流水)
+POST /api/accounts/{id}/reverse-repo            手动逆回购(默认当日14:30)
+POST /api/accounts/{id}/reverse-repo/reconcile  幂等补全闲置现金的逐日逆回购
 GET  /api/quotes?symbols=...           批量行情
 GET  /api/audit/chain/{event_id}       审计链路
 GET  /api/data/connectors/health       数据源状态
