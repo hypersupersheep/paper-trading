@@ -429,6 +429,70 @@ class TradingStore:
             row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
         return _row(row) if row else None
 
+    def delete_account(self, account_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        """删除一个账户及其全部子数据(sleeves / 持仓 / 订单 / 风控 / 择时绑定 / 调度任务)。
+
+        安全护栏:账户仍有持仓时默认拒绝,需显式 force=true 才强删,避免误删在用账户。
+        审计事件(历史流水)不随之清除——账本是 append-only,删账户不改写历史。
+        """
+        payload = payload or {}
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"unknown account_id: {account_id}")
+        force = bool(payload.get("force", False))
+
+        sleeves = self.list_sleeves(account_id)
+        position_count = sum(len(sleeve.get("positions", [])) for sleeve in sleeves)
+        if position_count > 0 and not force:
+            raise ValueError(
+                f"账户 {account_id} 仍有 {position_count} 个持仓;确认要删请传 force=true。"
+            )
+
+        # 同库里其它模块挂在 account_id 上的行,连带清理避免留孤儿(表可能在精简部署里不存在,先探测)。
+        cleanup = [
+            ("risk_configs", "account_id"),
+            ("timing_strategy_runs", "account_id"),
+            ("timing_strategy_bindings", "account_id"),
+            ("timing_decisions", "account_id"),
+            ("scheduler_tasks", "account_id"),
+        ]
+        with self._connection() as conn:
+            existing = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if {"scheduler_ticks", "scheduler_tasks"} <= existing:
+                conn.execute(
+                    "DELETE FROM scheduler_ticks WHERE task_id IN (SELECT id FROM scheduler_tasks WHERE account_id = ?)",
+                    (account_id,),
+                )
+            for table, column in cleanup:
+                if table in existing:
+                    conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (account_id,))
+            # 核心外键顺序:positions / paper_orders -> sleeves -> accounts
+            conn.execute("DELETE FROM positions WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM paper_orders WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM sleeves WHERE account_id = ?", (account_id,))
+            conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+
+        self.audit_store.record_event(
+            AuditEvent(
+                timestamp=_now(),
+                ledger_type="system",
+                event_type="account_deleted",
+                account_id=account_id,
+                reason="paper account deleted",
+                metadata={
+                    "name": account["name"],
+                    "removed_sleeves": len(sleeves),
+                    "removed_positions": position_count,
+                    "forced": force,
+                },
+            )
+        )
+        return {
+            "deleted": True,
+            "id": account_id,
+            "removed": {"sleeves": len(sleeves), "positions": position_count},
+        }
+
     def list_sleeves(self, account_id: str) -> list[dict[str, Any]]:
         with self._connection() as conn:
             rows = conn.execute("SELECT * FROM sleeves WHERE account_id = ? ORDER BY created_at ASC", (account_id,)).fetchall()

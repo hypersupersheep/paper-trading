@@ -301,6 +301,12 @@
             <label>逆回购年化<input id="newRepoRate" type="number" step="0.001" value="0.018" /></label>
           </div>
           <button class="primary" type="submit">创建账户</button>
+          <div class="account-delete-row">
+            <select id="deleteAccountSelect"></select>
+            <button type="button" id="deleteAccountBtn" class="danger-btn">删除该账户</button>
+          </div>
+          <label class="check-row"><input id="deleteAccountForce" type="checkbox" />有持仓也强制删除</label>
+          <div id="deleteAccountMsg" class="backfill-msg"></div>
         </form>
 
         <form id="sleeveForm" class="panel ops-panel">

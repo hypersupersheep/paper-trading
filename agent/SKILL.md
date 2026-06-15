@@ -94,6 +94,7 @@ Accounts & sleeves (multi-strategy capital units), paper broker (market/limit or
 ```
 GET  /api/meta                         能力发现(先调这个)
 GET|POST /api/accounts                 账户
+POST /api/accounts/{id}/delete         删除账户(有持仓需 {"force":true};连带清 sleeve/持仓/订单)
 POST /api/accounts/{id}/sleeves        资金单元
 POST /api/broker/orders                下单
 POST /api/broker/backfill              交易历史补充(补录历史成交,见下文)

@@ -527,5 +527,36 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(result["timestamp"][11:16], "10:30")
 
 
+    def test_delete_empty_account_removes_it_and_sleeves(self) -> None:
+        result = self.trading.delete_account("acct_test")
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["removed"]["sleeves"], 1)
+        self.assertIsNone(self.trading.get_account("acct_test"))
+        self.assertEqual(self.trading.list_sleeves("acct_test"), [])
+
+    def test_delete_account_with_positions_requires_force(self) -> None:
+        self.trading.backfill_trade(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "symbol": "600519.SH",
+                "side": "BUY",
+                "quantity": 100,
+                "price": 100,
+                "trade_date": "2024-01-02",
+            }
+        )
+        with self.assertRaises(ValueError):
+            self.trading.delete_account("acct_test")  # 有持仓,默认拒绝
+        result = self.trading.delete_account("acct_test", {"force": True})
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["removed"]["positions"], 1)
+        self.assertIsNone(self.trading.get_account("acct_test"))
+
+    def test_delete_unknown_account_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            self.trading.delete_account("acct_nope")
+
+
 if __name__ == "__main__":
     unittest.main()

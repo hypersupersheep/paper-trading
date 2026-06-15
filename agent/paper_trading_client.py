@@ -88,6 +88,10 @@ class PaperTradingClient:
     def create_account(self, name: str, initial_cash: float = 10_000_000, **friction: Any) -> dict:
         return self._post("/api/accounts", {"name": name, "initial_cash": initial_cash, **friction})["account"]
 
+    def delete_account(self, account_id: str, force: bool = False) -> dict:
+        """删除账户及其全部子数据。账户仍有持仓时需 force=True 才强删。"""
+        return self._post(f"/api/accounts/{account_id}/delete", {"force": force})
+
     def create_sleeve(self, account_id: str, name: str, strategy_id: str, allocated_cash: float) -> dict:
         return self._post(
             f"/api/accounts/{account_id}/sleeves",

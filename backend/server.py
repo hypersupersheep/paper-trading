@@ -238,6 +238,10 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 timing_strategy_id = unquote(path.removeprefix("/api/timing-strategies/").removesuffix("/delete").strip("/"))
                 self._json(self.timing.delete_timing_strategy(timing_strategy_id), HTTPStatus.CREATED)
                 return
+            if path.startswith("/api/accounts/") and path.endswith("/delete"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/delete").strip("/"))
+                self._json(self.trading.delete_account(account_id, payload), HTTPStatus.CREATED)
+                return
             if path.startswith("/api/strategies/") and path.endswith("/run"):
                 strategy_id = unquote(path.removeprefix("/api/strategies/").removesuffix("/run").strip("/"))
                 self._json(self.strategies.run_strategy(strategy_id, payload), HTTPStatus.CREATED)
@@ -400,6 +404,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             "endpoints": {
                 "meta": "GET /api/meta",
                 "accounts": "GET|POST /api/accounts",
+                "delete_account": "POST /api/accounts/{id}/delete",
                 "place_order": "POST /api/broker/orders",
                 "trade_backfill": "POST /api/broker/backfill",
                 "strategies": "GET|POST /api/strategies",

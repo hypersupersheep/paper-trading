@@ -841,6 +841,7 @@ function renderAccountControls() {
     "orderAccount",
     "repoAccount",
     "backfillAccount",
+    "deleteAccountSelect",
     "strategyRunAccount",
     "timingBindAccount",
     "timingRunAccount",
@@ -1621,6 +1622,27 @@ async function runReverseRepo(event) {
   await refreshAll(data.source_event_id);
 }
 
+async function deleteAccount() {
+  const msg = $("deleteAccountMsg");
+  const select = $("deleteAccountSelect");
+  const accountId = select.value;
+  if (!accountId) return;
+  const label = select.options[select.selectedIndex]?.text || accountId;
+  const force = $("deleteAccountForce").checked;
+  if (!window.confirm(`确定删除账户「${label}」？\n将一并清除其 sleeve / 持仓 / 订单,不可撤销。`)) return;
+  try {
+    const data = await postJson(`/api/accounts/${encodeURIComponent(accountId)}/delete`, { force });
+    msg.className = "backfill-msg ok";
+    msg.textContent = `已删除 ${data.id}（清理 ${data.removed.sleeves} sleeve、${data.removed.positions} 持仓）`;
+    showToast("账户已删除");
+    if ($("accountFilter").value === accountId) $("accountFilter").value = "";
+    await refreshAll();
+  } catch (error) {
+    msg.className = "backfill-msg err";
+    msg.textContent = error.message;
+  }
+}
+
 async function submitBackfill(event) {
   event.preventDefault();
   const msg = $("backfillMsg");
@@ -2082,6 +2104,7 @@ $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event)
 $("repoForm").addEventListener("submit", (event) => runReverseRepo(event).catch((error) => showToast(error.message)));
 $("backfillForm").addEventListener("submit", (event) => submitBackfill(event).catch((error) => showToast(error.message)));
 $("backfillAccount").addEventListener("change", renderBackfillSleeves);
+$("deleteAccountBtn").addEventListener("click", () => deleteAccount().catch((error) => showToast(error.message)));
 $("strategyFile").addEventListener("change", (event) =>
   loadPythonFile(event, {
     textareaId: "strategyCode",

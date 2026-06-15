@@ -1926,3 +1926,25 @@ tbody tr.selected {
 .backfill-msg.err {
   color: var(--danger);
 }
+
+/* 删除账户:危险操作,弱化为描边红按钮,放在创建按钮下方 */
+.account-delete-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.account-delete-row select {
+  flex: 1;
+}
+.danger-btn {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.danger-btn:hover {
+  background: var(--danger-soft);
+}

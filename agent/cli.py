@@ -153,6 +153,14 @@ def cmd_quotes(args, pt):
     )
 
 
+def cmd_delete_account(args, pt):
+    data = pt.delete_account(args.account_id, force=args.force)
+    if args.json:
+        return data
+    r = data.get("removed", {})
+    return f"已删除账户 {data['id']}（清理 {r.get('sleeves', 0)} 个 sleeve、{r.get('positions', 0)} 个持仓）"
+
+
 def cmd_backfill(args, pt):
     data = pt.backfill_trade(
         args.account_id,
@@ -241,6 +249,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", help="审查一个已存在的回测")
     p.add_argument("--backtest-id", required=True)
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("delete-account", help="删除不用的账户(及其 sleeve/持仓/订单)")
+    p.add_argument("--account-id", required=True)
+    p.add_argument("--force", action="store_true", help="账户仍有持仓时强制删除")
+    p.set_defaults(func=cmd_delete_account)
 
     p = sub.add_parser("backfill", help="交易历史补充:补录此前未记录的历史成交(只补历史,勿造正常交易)")
     p.add_argument("--account-id", required=True)
