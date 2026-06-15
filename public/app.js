@@ -1095,7 +1095,11 @@ function renderAccountControls() {
   const topSelect = $("topAccountSelect");
   topSelect.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${account.name}</option>`).join("");
   const activeAccount = $("accountFilter").value.trim() || state.accounts[0]?.id;
-  if (activeAccount && state.accounts.some((account) => account.id === activeAccount)) topSelect.value = activeAccount;
+  if (activeAccount && state.accounts.some((account) => account.id === activeAccount)) {
+    topSelect.value = activeAccount;
+    // 逆回购卡的账户跟随活动账户,保证"逆回购记录"展示的就是当前账户。
+    if (state.accounts.some((account) => account.id === activeAccount)) $("repoAccount").value = activeAccount;
+  }
   renderSleeveOptions();
   renderBackfillSleeves();
   renderStrategyRunSleeves();
@@ -1927,8 +1931,11 @@ async function runReverseRepo(event) {
 }
 
 async function loadReverseRepo() {
-  const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || $("repoAccount").value;
+  // 记录跟随当前活动账户(顶部选择器),并在面板上标明是哪个账户,避免歧义。
+  const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id;
   if (!accountId) return;
+  const account = state.accounts.find((a) => a.id === accountId);
+  $("repoAccountLabel").textContent = account ? account.name : accountId;
   // 自愈:每次查看记录前先幂等补全闲置现金的逐日逆回购,保证"列表=真相"(缺哪天补哪天,不重复)。
   await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo/reconcile`, { data_source: ticketSource() }).catch(() => {});
   let data;
@@ -2446,7 +2453,9 @@ $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event)
 $("repoForm").addEventListener("submit", (event) => runReverseRepo(event).catch((error) => showToast(error.message)));
 $("repoRateMode").addEventListener("change", () => applyRepoRateMode().catch(() => {}));
 $("repoSymbol").addEventListener("change", () => applyRepoRateMode().catch(() => {}));
-$("repoAccount").addEventListener("change", updateRepoAmountDefault);
+$("repoAccount").addEventListener("change", (event) =>
+  setActiveAccount(event.target.value).catch((error) => showToast(error.message)),
+);
 $("backfillForm").addEventListener("submit", (event) => submitBackfill(event).catch((error) => showToast(error.message)));
 $("backfillAccount").addEventListener("change", renderBackfillSleeves);
 $("deleteAccountBtn").addEventListener("click", () => deleteAccount().catch((error) => showToast(error.message)));
@@ -2475,12 +2484,19 @@ $("schedulerForm").addEventListener("submit", (event) => createSchedulerTask(eve
 $("schedulerTasks").addEventListener("click", (event) => handleSchedulerAction(event).catch((error) => showToast(error.message)));
 $("refreshPortfolio").addEventListener("click", () => loadPortfolio().catch((error) => showToast(error.message)));
 $("loadChart").addEventListener("click", () => loadChart().catch((error) => showToast(error.message)));
-$("topAccountSelect").addEventListener("change", (event) => {
-  // 顶栏切换账户:同步到筛选条并刷新组合/订单/审计。
-  $("accountFilter").value = event.target.value;
+// 统一切换活动账户:顶栏选择器与逆回购卡都走这里,保证全站(组合/订单/审计/逆回购记录/侧栏)一致。
+function setActiveAccount(id) {
+  if (!id) return Promise.resolve();
+  $("accountFilter").value = id;
+  $("topAccountSelect").value = id;
+  if (state.accounts.some((a) => a.id === id)) $("repoAccount").value = id;
   state.selectedId = null;
-  Promise.all([loadPortfolio(), loadOrders(), loadEvents()]).catch((error) => showToast(error.message));
-});
+  return Promise.all([loadPortfolio(), loadOrders(), loadEvents(), loadReverseRepo()]).then(updateRepoAmountDefault);
+}
+
+$("topAccountSelect").addEventListener("change", (event) =>
+  setActiveAccount(event.target.value).catch((error) => showToast(error.message)),
+);
 
 // ----------------------- 全局刷新 + 自动刷新 ----------------------- //
 let autoRefreshTimer = null;

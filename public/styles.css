@@ -2125,3 +2125,9 @@ tbody tr.selected {
   font-weight: 700;
   background: var(--surface-2);
 }
+
+/* 逆回购记录面板:标题里的账户名高亮,一眼知道是哪个账户 */
+.repo-acct {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
