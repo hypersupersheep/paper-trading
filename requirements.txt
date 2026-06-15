@@ -1,0 +1,6 @@
+mootdx
+pandas
+rqdatac
+pymysql
+pywebview
+pyinstaller

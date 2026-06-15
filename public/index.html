@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>量化模拟盘 · Audit Replay</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">QR</div>
+        <div>
+          <strong>量化研究平台</strong>
+          <span>Paper Trading</span>
+        </div>
+      </div>
+      <nav id="sidebarNav">
+        <button data-view="overview" class="active">概览</button>
+        <button data-view="performance">绩效</button>
+        <button data-view="backtest">回测</button>
+        <button data-view="strategy">策略</button>
+        <button data-view="timing">择时</button>
+        <button data-view="trading">模拟交易</button>
+        <button data-view="scheduler">调度</button>
+        <button data-view="replay">日志 / Replay</button>
+        <button data-view="data">数据源</button>
+      </nav>
+      <div class="account-box">
+        <span>模拟账户</span>
+        <strong>A-Share Alpha</strong>
+        <small>审计流水正常</small>
+      </div>
+    </aside>
+
+    <main class="app">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="viewTitle">组合概览</h1>
+          <p id="viewSubtitle">账户净值、sleeve 表现与持仓一览</p>
+        </div>
+        <div class="topbar-right">
+          <div class="account-switch">
+            <label>账户</label>
+            <select id="topAccountSelect"></select>
+          </div>
+          <div class="ticker-strip">
+            <div class="ticker"><span>账户权益</span><strong id="tickerEquity">--</strong></div>
+            <div class="ticker"><span>总盈亏</span><strong id="tickerPnl">--</strong></div>
+            <div class="ticker"><span>可用现金</span><strong id="tickerCash">--</strong></div>
+            <div class="ticker"><span>持仓市值</span><strong id="tickerMv">--</strong></div>
+            <div class="ticker"><span>仓位</span><strong id="tickerExposure">--</strong></div>
+          </div>
+          <div class="topbar-actions" data-view="replay">
+            <button id="exportJson">导出 JSON</button>
+            <button id="exportCsv" class="primary">导出 CSV</button>
+          </div>
+        </div>
+      </header>
+
+      <section class="metrics" data-view="overview">
+        <div>
+          <span>审计事件</span>
+          <strong id="metricEvents">--</strong>
+        </div>
+        <div>
+          <span>成交流水</span>
+          <strong id="metricTrades">--</strong>
+        </div>
+        <div>
+          <span>现金流水</span>
+          <strong id="metricCash">--</strong>
+        </div>
+        <div>
+          <span>择时拦截</span>
+          <strong id="metricBlocks">--</strong>
+        </div>
+        <div>
+          <span>风控拦截</span>
+          <strong id="metricRiskBlocks">--</strong>
+        </div>
+      </section>
+
+      <section class="panel portfolio-panel" data-view="overview">
+        <div class="panel-head compact">
+          <div>
+            <h2>组合概览</h2>
+            <span id="portfolioAccountName">Portfolio NAV</span>
+          </div>
+          <div class="portfolio-controls">
+            <label>数据源<select id="portfolioDataSource"></select></label>
+            <label>周期<select id="portfolioFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
+            <button id="refreshPortfolio" type="button">刷新净值</button>
+          </div>
+        </div>
+        <div id="portfolioUpdatedAt" class="portfolio-mark">last marked by fills</div>
+        <div class="portfolio-summary">
+          <div>
+            <span>账户权益</span>
+            <strong id="portfolioEquity">--</strong>
+          </div>
+          <div>
+            <span>总盈亏</span>
+            <strong id="portfolioPnl">--</strong>
+          </div>
+          <div>
+            <span>现金</span>
+            <strong id="portfolioCash">--</strong>
+          </div>
+          <div>
+            <span>持仓市值</span>
+            <strong id="portfolioMarketValue">--</strong>
+          </div>
+          <div>
+            <span>仓位</span>
+            <strong id="portfolioExposure">--</strong>
+          </div>
+        </div>
+        <div class="portfolio-detail-grid">
+          <div>
+            <h3>Sleeves</h3>
+            <div id="portfolioSleeves" class="portfolio-list"></div>
+          </div>
+          <div>
+            <h3>Positions</h3>
+            <div id="portfolioPositions" class="portfolio-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="perf-view" data-view="performance">
+        <div class="perf-metrics" id="perfMetrics"></div>
+        <section class="panel perf-chart-panel">
+          <div class="panel-head compact">
+            <h2>净值曲线 · Equity Curve</h2>
+            <div class="perf-controls">
+              <label>基准源<select id="perfBenchSource"></select></label>
+              <button id="recordSnapshot" type="button">记录快照</button>
+            </div>
+          </div>
+          <div class="perf-sub">
+            <span id="perfSubtitle">—</span>
+            <span class="perf-legend" id="perfLegend"></span>
+          </div>
+          <div id="perfEquityChart" class="perf-chart"></div>
+        </section>
+        <section class="panel perf-chart-panel">
+          <div class="panel-head compact">
+            <h2>回撤曲线 · Drawdown</h2>
+            <span>相对历史峰值的回撤(越深风险越大)</span>
+          </div>
+          <div id="perfDrawdownChart" class="perf-chart perf-chart-sm"></div>
+        </section>
+      </section>
+
+      <section class="backtest-view" data-view="backtest">
+        <form id="backtestForm" class="panel bt-config">
+          <div class="panel-head compact">
+            <h2>回测配置</h2>
+            <span>选策略 · 区间 · 摩擦 · 基准 → 一键回测</span>
+          </div>
+          <div class="form-grid bt-grid">
+            <label>回测名称<input id="btName" value="我的回测" /></label>
+            <label>选股策略<select id="btStrategy"></select></label>
+            <label>择时策略<select id="btTiming"></select></label>
+            <label>标的（逗号分隔）<input id="btSymbols" value="000001.SZ" /></label>
+            <label>数据源<select id="btDataSource"></select></label>
+            <label>频率<select id="btFrequency"><option>1d</option><option>5m</option><option>1m</option></select></label>
+            <label>开始日期<input id="btStart" type="date" /></label>
+            <label>结束日期<input id="btEnd" type="date" /></label>
+            <label>初始资金<input id="btInitialCash" type="number" value="1000000" /></label>
+            <label>手续费率<input id="btCommission" type="number" step="0.00001" value="0.00025" /></label>
+            <label>印花税率<input id="btStamp" type="number" step="0.0001" value="0.0005" /></label>
+            <label>滑点 bps<input id="btSlippage" type="number" step="0.1" value="2" /></label>
+            <label>基准代码<input id="btBenchmark" value="000300.SH" /></label>
+            <label>基准源<select id="btBenchSource"></select></label>
+          </div>
+          <button class="primary" type="submit" id="btRun">运行回测</button>
+        </form>
+
+        <section class="panel bt-result-panel">
+          <div class="panel-head compact">
+            <h2>回测结果</h2>
+            <div class="bt-result-actions">
+              <button id="btExportCsv" type="button">下载 CSV</button>
+              <button id="btExportJson" type="button">下载 JSON</button>
+            </div>
+          </div>
+          <div class="perf-sub">
+            <span id="btResultSub">运行回测后显示净值曲线、指标与成交</span>
+            <span class="perf-legend" id="btLegend"></span>
+          </div>
+          <div class="perf-metrics" id="btMetrics"></div>
+          <div id="btChart" class="perf-chart"></div>
+        </section>
+
+        <div class="bt-lower">
+          <section class="panel bt-trades-panel">
+            <div class="panel-head compact">
+              <h2>成交明细</h2>
+              <span id="btTradesSub">—</span>
+            </div>
+            <div class="blotter-wrap">
+              <table class="blotter">
+                <thead>
+                  <tr><th>时间</th><th>代码</th><th>方向</th><th>数量</th><th>价格</th><th>手续费</th><th>印花税</th><th>已实现盈亏</th></tr>
+                </thead>
+                <tbody id="btTrades"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel bt-history-panel">
+            <div class="panel-head compact">
+              <h2>历史回测</h2>
+              <span>点击载入</span>
+            </div>
+            <div id="btHistory" class="bt-history"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="trade-workspace" data-view="trading">
+        <div class="panel watchlist-panel">
+          <div class="panel-head compact">
+            <h2>自选股</h2>
+            <span>Watchlist</span>
+          </div>
+          <form id="watchlistAddForm" class="watchlist-add">
+            <input id="watchlistInput" placeholder="加自选，如 601318.SH" />
+            <button type="submit" class="primary">+ 添加</button>
+          </form>
+          <div id="watchlist" class="watchlist"></div>
+        </div>
+
+        <form id="orderForm" class="panel ticket">
+          <div class="panel-head compact">
+            <h2>交易下单</h2>
+            <span>Trade Ticket</span>
+          </div>
+          <div class="ticket-body">
+            <div class="side-toggle">
+              <button type="button" data-side="BUY" class="active buy">买入</button>
+              <button type="button" data-side="SELL" class="sell">卖出</button>
+            </div>
+            <select id="orderSide" hidden><option>BUY</option><option>SELL</option></select>
+            <label>代码<input id="orderSymbol" value="600519.SH" /></label>
+            <div class="ticket-last" id="ticketLast">现价 --</div>
+            <div class="ticket-row">
+              <label>账户<select id="orderAccount"></select></label>
+              <label>Sleeve<select id="orderSleeve"></select></label>
+            </div>
+            <div class="ticket-row">
+              <label>价格类型<select id="orderPriceType"><option value="market">市价</option><option value="limit">限价</option></select></label>
+              <label>价格<input id="orderSignalPrice" type="number" step="0.01" placeholder="市价单无需填" disabled /></label>
+            </div>
+            <label>数量（股）<input id="orderQuantity" type="number" step="100" value="100" /></label>
+            <div class="qty-quick">
+              <button type="button" data-qty="0.25">¼仓</button>
+              <button type="button" data-qty="0.5">½仓</button>
+              <button type="button" data-qty="1">全仓</button>
+              <span id="ticketMaxShares"></span>
+            </div>
+            <div class="ticket-estimate" id="ticketEstimate">预估金额 --</div>
+            <select id="orderDataSource" hidden></select>
+            <input id="orderAllowOpen" type="checkbox" checked hidden />
+          </div>
+          <button class="primary buy" type="submit" id="ticketSubmit">买入下单</button>
+        </form>
+
+        <div class="panel blotter-panel">
+          <div class="panel-head compact">
+            <h2>持仓</h2>
+            <span>Positions Blotter · 一键平仓</span>
+          </div>
+          <div class="blotter-wrap">
+            <table class="blotter">
+              <thead>
+                <tr>
+                  <th>代码</th><th>策略</th><th>数量</th><th>成本价</th><th>现价</th>
+                  <th>市值</th><th>浮动盈亏</th><th>波动率</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="blotter"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="ops-grid" data-view="trading">
+        <form id="accountForm" class="panel ops-panel">
+          <div class="panel-head compact">
+            <h2>账户配置</h2>
+            <span>Account</span>
+          </div>
+          <div class="form-grid">
+            <label>账户名<input id="newAccountName" value="A-Share Test" /></label>
+            <label>初始资金<input id="newInitialCash" type="number" value="10000000" /></label>
+            <label>手续费率<input id="newCommissionRate" type="number" step="0.00001" value="0.00025" /></label>
+            <label>印花税率<input id="newStampDutyRate" type="number" step="0.0001" value="0.0005" /></label>
+            <label>滑点 bps<input id="newSlippageValue" type="number" step="0.1" value="2" /></label>
+            <label>逆回购年化<input id="newRepoRate" type="number" step="0.001" value="0.018" /></label>
+          </div>
+          <button class="primary" type="submit">创建账户</button>
+        </form>
+
+        <form id="sleeveForm" class="panel ops-panel">
+          <div class="panel-head compact">
+            <h2>策略资金单元</h2>
+            <span>Sleeve</span>
+          </div>
+          <div class="form-grid">
+            <label>账户<select id="sleeveAccount"></select></label>
+            <label>Sleeve 名称<input id="newSleeveName" value="Manual Strategy Sleeve" /></label>
+            <label>Strategy ID<input id="newSleeveStrategy" value="strategy_manual_5m" /></label>
+            <label>分配资金<input id="newSleeveCash" type="number" value="1000000" /></label>
+          </div>
+          <button class="primary" type="submit">创建 Sleeve</button>
+        </form>
+
+        <form id="repoForm" class="panel ops-panel">
+          <div class="panel-head compact">
+            <h2>国债逆回购</h2>
+            <span>Cash</span>
+          </div>
+          <div class="form-grid">
+            <label>账户<select id="repoAccount"></select></label>
+            <label>投入现金<input id="repoAmount" type="number" value="1000000" /></label>
+            <label>年化利率<input id="repoRate" type="number" step="0.001" value="0.018" /></label>
+          </div>
+          <button class="primary" type="submit">执行逆回购</button>
+        </form>
+      </section>
+
+      <section class="risk-workbench" data-view="trading">
+        <form id="riskForm" class="panel ops-panel risk-config">
+          <div class="panel-head compact">
+            <h2>风控配置</h2>
+            <span>Pre-trade Risk Gate</span>
+          </div>
+          <div class="form-grid">
+            <label>账户<select id="riskAccount"></select></label>
+            <label>Sleeve<select id="riskSleeve"></select></label>
+            <label>单笔最大金额<input id="riskMaxOrderNotional" type="number" min="0" placeholder="留空不限" /></label>
+            <label>最大敞口比例<input id="riskMaxSleeveExposure" type="number" min="0" step="0.01" placeholder="如 0.8" /></label>
+            <label>单标的最大持仓<input id="riskMaxSymbolPosition" type="number" min="0" step="100" placeholder="股数" /></label>
+            <label>最小现金缓冲<input id="riskMinCashBuffer" type="number" min="0" placeholder="留空不限" /></label>
+            <label>每 Tick 最大订单<input id="riskMaxOrdersPerTick" type="number" min="0" placeholder="留空不限" /></label>
+            <label>每日最大订单<input id="riskMaxOrdersPerDay" type="number" min="0" placeholder="留空不限" /></label>
+            <label class="check-row"><input id="riskEnabled" type="checkbox" checked />启用该层风控</label>
+          </div>
+          <button class="primary" type="submit">保存风控配置</button>
+        </form>
+
+        <div class="panel risk-status">
+          <div class="panel-head compact">
+            <h2>风控规则</h2>
+            <span>sleeve 配置覆盖 account 配置</span>
+          </div>
+          <div id="riskConfigs" class="risk-list"></div>
+        </div>
+      </section>
+
+      <section class="panel order-book-panel" data-view="trading">
+        <div class="panel-head compact">
+          <h2>订单簿</h2>
+          <span>created → submitted → partial/full fill → cancel/reject</span>
+        </div>
+        <div id="orderBook" class="order-book-list"></div>
+      </section>
+
+      <section class="panel strategy-board-panel" data-view="strategy">
+        <div class="panel-head compact">
+          <h2>策略持仓矩阵</h2>
+          <span>一个策略一张表 · 行为持仓 · 可调占比与启停</span>
+        </div>
+        <div id="strategyBoard" class="strategy-board"></div>
+      </section>
+
+      <section class="strategy-workbench" data-view="strategy">
+        <form id="strategyImportForm" class="panel strategy-import">
+          <div class="panel-head compact">
+            <h2>策略导入</h2>
+            <span>on_bar / handle_bar / class / 信号函数，自动接入驱动</span>
+          </div>
+          <div class="strategy-form-body">
+            <label>策略名称<input id="strategyName" value="Demo Momentum 5m" /></label>
+            <label class="file-label">策略文件<input id="strategyFile" type="file" accept=".py,text/x-python,text/plain" /></label>
+            <label class="code-label">策略代码<textarea id="strategyCode" spellcheck="false">def on_init(ctx):
+    ctx.log("INFO", "strategy initialized")
+
+
+def on_bar(ctx, bar):
+    # 示例：当 5m K 线收盘价高于开盘价时，在下一根 K 线开盘买入 100 股。
+    if bar["symbol"] == "000001.SZ" and bar["close"] &gt; bar["open"]:
+        ctx.order_market(bar["symbol"], 100, side="BUY", reason="close &gt; open momentum")
+</textarea></label>
+          </div>
+          <button class="primary" type="submit">导入策略</button>
+          <div id="strategyList" class="managed-list"></div>
+        </form>
+
+        <form id="strategyRunForm" class="panel strategy-runner">
+          <div class="panel-head compact">
+            <h2>策略运行</h2>
+            <span>Subprocess Runner</span>
+          </div>
+          <div class="form-grid runner-grid">
+            <label>策略<select id="strategySelect"></select></label>
+            <label>账户<select id="strategyRunAccount"></select></label>
+            <label>Sleeve<select id="strategyRunSleeve"></select></label>
+            <label>数据源<select id="strategyDataSource"></select></label>
+            <label>Symbols<input id="strategySymbols" value="000001.SZ" /></label>
+            <label>频率<select id="strategyFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
+            <label>Bar 数<input id="strategyBarLimit" type="number" value="8" /></label>
+          </div>
+          <button class="primary" type="submit">运行策略</button>
+          <div id="connectorHealth" class="connector-health"></div>
+          <div id="strategyRuns" class="run-list"></div>
+        </form>
+      </section>
+
+      <section class="timing-workbench" data-view="timing">
+        <form id="timingImportForm" class="panel timing-import">
+          <div class="panel-head compact">
+            <h2>择时策略导入</h2>
+            <span>on_bar / 信号函数(返回 True/False)，自动接入驱动</span>
+          </div>
+          <div class="strategy-form-body">
+            <label>择时策略名称<input id="timingName" value="Demo Market Regime Gate" /></label>
+            <label class="file-label">择时文件<input id="timingFile" type="file" accept=".py,text/x-python,text/plain" /></label>
+            <label class="code-label">择时代码<textarea id="timingCode" spellcheck="false">def on_init(ctx):
+    ctx.log("INFO", "timing strategy initialized")
+
+
+def on_bar(ctx, bar):
+    # 示例：最近 3 根 K 线走弱时，禁止选股策略新开仓，只允许减仓。
+    history = ctx.history(bar["symbol"], ["close"], 3)
+    if len(history) &lt; 3:
+        return
+    allow_open = bar["close"] &gt;= history[0]["close"]
+    ctx.set_decision(
+        allow_open=allow_open,
+        position_policy="hold" if allow_open else "reduce_only",
+        reason="risk-on: allow stock strategy openings" if allow_open else "risk-off: block new openings",
+        metadata={"lookback": 3, "symbol": bar["symbol"]},
+    )
+</textarea></label>
+          </div>
+          <button class="primary" type="submit">导入择时策略</button>
+          <div id="timingList" class="managed-list"></div>
+        </form>
+
+        <div class="timing-side">
+          <form id="timingBindForm" class="panel timing-bind">
+            <div class="panel-head compact">
+              <h2>择时绑定</h2>
+              <span>Gate binding</span>
+            </div>
+            <div class="form-grid">
+              <label>择时策略<select id="timingBindStrategy"></select></label>
+              <label>控制选股策略<select id="timingBindStockStrategy"></select></label>
+              <label>账户<select id="timingBindAccount"></select></label>
+              <label>Sleeve<select id="timingBindSleeve"></select></label>
+            </div>
+            <button class="primary" type="submit">绑定 Gate</button>
+            <div id="timingBindings" class="binding-list"></div>
+          </form>
+
+          <form id="timingRunForm" class="panel timing-runner">
+            <div class="panel-head compact">
+              <h2>择时运行</h2>
+              <span>Independent Runner</span>
+            </div>
+            <div class="form-grid runner-grid">
+              <label>择时策略<select id="timingRunStrategy"></select></label>
+              <label>控制策略<select id="timingRunControlledStrategy"></select></label>
+              <label>账户<select id="timingRunAccount"></select></label>
+              <label>Sleeve<select id="timingRunSleeve"></select></label>
+              <label>数据源<select id="timingRunDataSource"></select></label>
+              <label>Symbols<input id="timingRunSymbols" value="000001.SZ" /></label>
+              <label>频率<select id="timingRunFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
+              <label>Bar 数<input id="timingRunBarLimit" type="number" value="8" /></label>
+            </div>
+            <button class="primary" type="submit">运行择时</button>
+            <div id="timingDecisions" class="decision-list"></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="scheduler-workbench" data-view="scheduler">
+        <form id="schedulerForm" class="panel scheduler-config">
+          <div class="panel-head compact">
+            <h2>实时模拟调度</h2>
+            <span>Live Scheduler</span>
+          </div>
+          <div class="form-grid scheduler-grid">
+            <label>任务名<input id="schedulerName" value="Demo 5m Live Loop" /></label>
+            <label>账户<select id="schedulerAccount"></select></label>
+            <label>Sleeve<select id="schedulerSleeve"></select></label>
+            <label>选股策略<select id="schedulerStrategy"></select></label>
+            <label>择时策略<select id="schedulerTiming"></select></label>
+            <label>数据源<select id="schedulerDataSource"></select></label>
+            <label>Symbols<input id="schedulerSymbols" value="000001.SZ" /></label>
+            <label>频率<select id="schedulerFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
+            <label>轮询秒数<input id="schedulerInterval" type="number" value="300" /></label>
+            <label>Bar 数<input id="schedulerBarLimit" type="number" value="8" /></label>
+            <label>交易日历<select id="schedulerCalendar"><option value="CN_A">CN_A</option></select></label>
+            <label class="check-row"><input id="schedulerCalendarEnabled" type="checkbox" checked />交易时段门控</label>
+            <label class="check-row"><input id="schedulerDedupeBars" type="checkbox" checked />K 线去重</label>
+          </div>
+          <button class="primary" type="submit">创建调度任务</button>
+        </form>
+
+        <div class="panel scheduler-status">
+          <div class="panel-head compact">
+            <h2>任务状态</h2>
+            <span>Start / Stop / Tick</span>
+          </div>
+          <div id="schedulerTasks" class="scheduler-list"></div>
+          <div id="schedulerTicks" class="tick-list"></div>
+        </div>
+      </section>
+
+      <section class="panel data-panel" data-view="data">
+        <div class="panel-head compact">
+          <h2>行情数据源</h2>
+          <span>Connector Health</span>
+        </div>
+        <div id="dataConnectors" class="connector-board"></div>
+        <div class="data-actions">
+          <button id="refreshConnectors" class="primary" type="button">刷新状态</button>
+          <label class="default-source">默认数据源<select id="defaultDataSource"></select></label>
+          <span class="data-hint">fixture 为内置测试行情；tongdaxin 免密钥拉 A 股实时 K 线；ricequant 输入密钥后台自动连接。默认数据源会预选到全站所有数据源下拉框。</span>
+        </div>
+      </section>
+
+      <section class="panel quote-panel" data-view="data">
+        <div class="panel-head compact">
+          <h2>行情快照</h2>
+          <span>Latest Bars</span>
+        </div>
+        <div class="form-grid quote-grid">
+          <label>代码<input id="quoteSymbol" value="000001.SZ" /></label>
+          <label>数据源<select id="quoteDataSource"></select></label>
+          <label>周期<select id="quoteFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
+        </div>
+        <button id="loadQuote" class="primary" type="button">拉取最新行情</button>
+        <div id="quoteBars" class="quote-list"></div>
+      </section>
+
+      <section class="panel storage-panel" data-view="data">
+        <div class="panel-head compact">
+          <h2>本地数据存储</h2>
+          <span>账户/策略/回测数据存放位置 · 各用户独立</span>
+        </div>
+        <div class="storage-body">
+          <div class="storage-current">
+            <span>当前位置</span>
+            <strong id="storagePath">—</strong>
+            <em id="storageNote"></em>
+          </div>
+          <div class="storage-actions">
+            <input id="storageInput" placeholder="输入新的文件夹绝对路径" hidden />
+            <button id="storagePick" type="button" class="primary">更改位置…</button>
+            <button id="storageReset" type="button">恢复默认</button>
+            <label class="storage-move"><input id="storageMove" type="checkbox" checked />把现有数据复制过去</label>
+          </div>
+          <div id="storageMsg" class="storage-msg"></div>
+        </div>
+      </section>
+
+      <section class="panel chart-panel" data-view="replay">
+        <div class="panel-head chart-head">
+          <div>
+            <h2>K 线复盘</h2>
+            <span>TradingView 图表 · 买卖点 marker</span>
+          </div>
+          <div class="chart-controls">
+            <label>代码<input id="chartSymbol" value="000001.SZ" /></label>
+            <label>数据源<select id="chartDataSource"></select></label>
+            <label>周期<select id="chartFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
+            <label>数量<input id="chartLimit" type="number" value="120" /></label>
+            <button id="loadChart" class="primary" type="button">加载 K 线</button>
+          </div>
+        </div>
+        <div class="chart-legend" id="chartLegend"></div>
+        <div class="chart-body">
+          <div id="klineChart"></div>
+        </div>
+      </section>
+
+      <div id="toast" class="toast" hidden></div>
+
+      <section class="filters" data-view="replay">
+        <label>
+          账户
+          <input id="accountFilter" value="acct_a_share_alpha" />
+        </label>
+        <label>
+          策略
+          <input id="strategyFilter" placeholder="strategy_id" />
+        </label>
+        <label>
+          代码
+          <input id="symbolFilter" placeholder="600519.SH" />
+        </label>
+        <label>
+          类型
+          <select id="eventTypeFilter">
+            <option value="">全部</option>
+            <option value="strategy_signal">策略信号</option>
+            <option value="timing_strategy_imported">择时导入</option>
+            <option value="timing_strategy_bound">择时绑定</option>
+            <option value="timing_strategy_run_started">择时启动</option>
+            <option value="timing_decision">择时决策</option>
+            <option value="timing_blocked">择时拦截</option>
+            <option value="risk_blocked">风控拦截</option>
+            <option value="risk_config_updated">风控配置</option>
+            <option value="scheduler_task_created">调度创建</option>
+            <option value="scheduler_task_started">调度启动</option>
+            <option value="scheduler_task_stopped">调度停止</option>
+            <option value="scheduler_tick_started">Tick 启动</option>
+            <option value="scheduler_tick_completed">Tick 完成</option>
+            <option value="scheduler_tick_skipped">Tick 跳过</option>
+            <option value="scheduler_tick_failed">Tick 失败</option>
+            <option value="order_created">订单创建</option>
+            <option value="order_submitted">订单提交</option>
+            <option value="order_partially_filled">部分成交</option>
+            <option value="order_filled">订单全成</option>
+            <option value="order_cancelled">订单撤销</option>
+            <option value="order_rejected">订单拒绝</option>
+            <option value="trade_filled">成交</option>
+            <option value="commission">手续费</option>
+            <option value="stamp_duty">印花税</option>
+            <option value="slippage">滑点</option>
+            <option value="reverse_repo_interest">逆回购利息</option>
+          </select>
+        </label>
+        <button id="applyFilters" class="primary">筛选</button>
+        <button id="resetFilters">重置</button>
+      </section>
+
+      <section class="workspace" data-view="replay">
+        <div class="panel event-list">
+          <div class="panel-head">
+            <h2>结构化审计流水</h2>
+            <span>点击任意行查看完整审计链路</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>Ledger</th>
+                  <th>事件</th>
+                  <th>代码</th>
+                  <th>金额</th>
+                  <th>数量</th>
+                  <th>价格</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="eventsTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="panel chain-panel">
+          <div class="panel-head">
+            <h2>Audit Chain</h2>
+            <span id="chainSubtitle">选择一条事件</span>
+          </div>
+          <div id="chainContent" class="chain-empty">信号 → 择时 → 风控 → 订单 → 成交 → 现金 → 持仓 → 净值</div>
+        </aside>
+      </section>
+    </main>
+    <script src="/vendor/lightweight-charts.standalone.production.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

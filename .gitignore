@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal
+strategies/*.py
+timing_strategies/*.py
+node_modules/
+dist/
+coverage/
+data/connector_settings.json
+build/
+dist/
+*.spec.bak
+# 调试用截图/导出,不入库
+outputs/
+# 兜底:任何凭据/密钥文件都不上传
+**/connector_settings.json
+*.secret
+.env
