@@ -997,6 +997,11 @@ function renderBackfillSleeves() {
 }
 
 function updateTicker(account) {
+  // 左下侧边栏"当前账户"跟随选中账户(此前写死 A-Share Alpha)。
+  $("sidebarAccountName").textContent = account?.name || "--";
+  if ($("sidebarAccountStatus")) {
+    $("sidebarAccountStatus").textContent = account ? `权益 ¥${formatNumber(account.equity)}` : "审计流水正常";
+  }
   if (!account) {
     for (const id of ["tickerEquity", "tickerPnl", "tickerCash", "tickerMv", "tickerExposure"]) {
       $(id).textContent = "--";
@@ -2292,6 +2297,44 @@ $("topAccountSelect").addEventListener("change", (event) => {
   Promise.all([loadPortfolio(), loadOrders(), loadEvents()]).catch((error) => showToast(error.message));
 });
 
+// ----------------------- 全局刷新 + 自动刷新 ----------------------- //
+let autoRefreshTimer = null;
+
+async function manualRefresh(btnId) {
+  const btn = btnId ? $(btnId) : null;
+  if (btn) btn.classList.add("refreshing");
+  try {
+    await refreshAll();
+    await refreshTicketQuote().catch(() => {});
+  } finally {
+    if (btn) btn.classList.remove("refreshing");
+  }
+}
+
+function setupAutoRefresh() {
+  state.autoRefresh = $("autoRefreshToggle")?.checked ?? true;
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  // 每 20 秒拉一次,让 agent(或其他窗口)干完活后无需重开即可看到更新。
+  autoRefreshTimer = setInterval(() => {
+    if (!state.autoRefresh || document.hidden) return;
+    const ae = document.activeElement;
+    // 用户正在输入/选择时跳过,避免打断操作。
+    if (ae && ["INPUT", "SELECT", "TEXTAREA"].includes(ae.tagName)) return;
+    refreshAll().catch(() => {});
+  }, 20000);
+}
+
+$("globalRefresh").addEventListener("click", () => manualRefresh("globalRefresh").catch((e) => showToast(e.message)));
+$("perfRefresh").addEventListener("click", () => {
+  const btn = $("perfRefresh");
+  btn.classList.add("refreshing");
+  loadPerformance().catch((e) => showToast(e.message)).finally(() => btn.classList.remove("refreshing"));
+});
+$("autoRefreshToggle").addEventListener("change", (event) => {
+  state.autoRefresh = event.target.checked;
+  showToast(state.autoRefresh ? "自动刷新已开(每 20 秒)" : "自动刷新已关");
+});
+
 window.paperApp = {
   state,
   loadChart,
@@ -2305,4 +2348,5 @@ refreshAll()
   .then(() => refreshTicketQuote())
   .catch((error) => {
     $("eventsTable").innerHTML = `<tr><td colspan="8">加载失败：${escapeHtml(error.message)}</td></tr>`;
-  });
+  })
+  .finally(() => setupAutoRefresh());

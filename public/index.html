@@ -9,7 +9,7 @@
   <body>
     <aside class="sidebar">
       <div class="brand">
-        <div class="mark">QR</div>
+        <img class="mark" src="/icon.svg" alt="logo" />
         <div>
           <strong>量化研究平台</strong>
           <span>Paper Trading</span>
@@ -27,9 +27,9 @@
         <button data-view="data">数据源</button>
       </nav>
       <div class="account-box">
-        <span>模拟账户</span>
-        <strong>A-Share Alpha</strong>
-        <small>审计流水正常</small>
+        <span>当前账户</span>
+        <strong id="sidebarAccountName">--</strong>
+        <small id="sidebarAccountStatus">审计流水正常</small>
       </div>
     </aside>
 
@@ -54,6 +54,12 @@
           <div class="topbar-actions" data-view="replay">
             <button id="exportJson">导出 JSON</button>
             <button id="exportCsv" class="primary">导出 CSV</button>
+          </div>
+          <div class="topbar-actions refresh-actions">
+            <label class="auto-refresh" title="自动刷新:agent 干完活无需重开即可看到更新">
+              <input id="autoRefreshToggle" type="checkbox" checked /><span>自动刷新</span>
+            </label>
+            <button id="globalRefresh" class="primary" title="立即刷新全部数据">⟳ 刷新</button>
           </div>
         </div>
       </header>
@@ -135,6 +141,7 @@
             <h2>净值曲线 · Equity Curve</h2>
             <div class="perf-controls">
               <label>基准源<select id="perfBenchSource"></select></label>
+              <button id="perfRefresh" class="primary" type="button">⟳ 刷新</button>
               <button id="recordSnapshot" type="button">记录快照</button>
             </div>
           </div>

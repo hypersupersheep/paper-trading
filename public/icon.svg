@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- 单一图标源:web 左上 logo 与 app icon 同源。改这里后跑 ./generate_icons.sh 同步 .icns/.ico -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b2230"/>
+      <stop offset="1" stop-color="#0d1017"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd66b"/>
+      <stop offset="1" stop-color="#e0a32e"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+  <rect x="16.5" y="16.5" width="479" height="479" rx="111.5" fill="none" stroke="#2a3242" stroke-width="3"/>
+  <g fill="none" stroke="url(#gold)" stroke-width="17" stroke-linecap="round">
+    <circle cx="256" cy="256" r="74"/>
+    <g>
+      <line x1="256" y1="120" x2="256" y2="158"/>
+      <line x1="256" y1="354" x2="256" y2="392"/>
+      <line x1="120" y1="256" x2="158" y2="256"/>
+      <line x1="354" y1="256" x2="392" y2="256"/>
+      <line x1="160" y1="160" x2="187" y2="187"/>
+      <line x1="325" y1="325" x2="352" y2="352"/>
+      <line x1="352" y1="160" x2="325" y2="187"/>
+      <line x1="187" y1="325" x2="160" y2="352"/>
+    </g>
+  </g>
+</svg>
