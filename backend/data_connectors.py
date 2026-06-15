@@ -238,6 +238,28 @@ class RiceQuantDataConnector:
         key = settings.get("license_key")
         return str(key) if key else None
 
+    def get_names(self, symbols: list[str]) -> dict[str, str]:
+        """用 rqdatac.instruments 取个股中文名。失败/未配置时返回空,绝不抛错。"""
+        key = self._license_key()
+        if not key or not symbols:
+            return {}
+        try:
+            rqdatac = self._import_rqdatac()
+            if self._inited_key != key:
+                rqdatac.init("license", key)
+                self._inited_key = key
+            info = rqdatac.instruments([_rq_symbol(s) for s in symbols])
+            items = info if isinstance(info, list) else [info]
+            result: dict[str, str] = {}
+            for inst in items:
+                obid = getattr(inst, "order_book_id", None)
+                name = getattr(inst, "symbol", None)
+                if obid and name:
+                    result[_from_rq_symbol(str(obid))] = str(name)
+            return result
+        except Exception:
+            return {}
+
     def supported_frequencies(self) -> list[str]:
         return ["5m", "1m", "1d"]
 

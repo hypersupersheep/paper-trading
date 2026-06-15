@@ -103,6 +103,10 @@ def connector_settings_path() -> Path:
     return data_dir() / "connector_settings.json"
 
 
+def security_names_path() -> Path:
+    return data_dir() / "security_names.json"
+
+
 def strategies_dir() -> Path:
     return _ensure(home() / "strategies")
 

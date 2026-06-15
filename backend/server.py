@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from backend import names as security_names
 from backend import paths
 from backend.audit_store import AuditEvent, LEDGER_TYPES, AuditStore
 from backend.backtest_store import BacktestStore
@@ -302,6 +303,21 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    @staticmethod
+    def _refresh_names(connector: Any, symbols: list[str]) -> None:
+        """best-effort:用数据源给尚未命名(resolve 后仍等于代码)的标的取名并缓存。"""
+        if not symbols or not hasattr(connector, "get_names"):
+            return
+        pending = [s for s in symbols if security_names.resolve(s) == str(s).upper()]
+        if not pending:
+            return
+        try:
+            fetched = connector.get_names(pending)
+            if fetched:
+                security_names.update(fetched)
+        except Exception:
+            pass
+
     def _portfolio_summary(self, query: dict[str, str | None]) -> dict:
         account_id = query.get("account_id")
         data_source = query.get("data_source")
@@ -311,6 +327,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         frequency = normalize_frequency(query.get("frequency") or "5m")
         connector = self.strategies.connectors.get(data_source)
         symbols = self.trading.list_position_symbols(account_id)
+        # 顺带用数据源给未命名的持仓取名并缓存(best-effort,绝不影响盯市)。
+        self._refresh_names(connector, symbols)
         mark_prices: dict[str, dict] = {}
         if symbols:
             # 多拉几根 bar: 最新 close 做盯市价, 整段收益序列算 bar 级波动率。

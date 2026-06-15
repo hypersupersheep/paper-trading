@@ -4,11 +4,12 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from backend import friction
+from backend import names as security_names
 from backend.audit_store import AuditEvent, AuditStore
 from backend.data_connectors import normalize_frequency
 
@@ -1660,6 +1661,7 @@ def _enrich_position(
         "sleeve_name": sleeve["name"],
         "strategy_id": sleeve["strategy_id"],
         "symbol": position["symbol"],
+        "name": security_names.resolve(position["symbol"]),
         "quantity": quantity,
         "avg_cost": avg_cost,
         "last_price": last_price,
@@ -1712,11 +1714,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _trade_timestamp(trade_date: Any, trade_time: Any) -> str:
-    """把用户声明的历史日期(至少 YYYY-MM-DD)+ 可选时间(HH:MM[:SS])转成带时区的 ISO 时间戳。
+CN_TZ = timezone(timedelta(hours=8))  # A 股北京时间 UTC+8
 
-    交易历史补充只要求精确到日期;不给具体时间时,按当日 15:00(A股收盘附近)记,
-    方便与日线对齐排序。
+
+def _trade_timestamp(trade_date: Any, trade_time: Any) -> str:
+    """把用户声明的历史日期(至少 YYYY-MM-DD)+ 可选时间(HH:MM[:SS])转成带时区(北京)的 ISO 时间戳。
+
+    交易历史补充只要求精确到日期;不给具体时间时,默认按当日 **9:30 早盘开盘**记——
+    因为开仓通常在早盘,而闲置资金的逆回购在下午 14:30,默认早盘可避免与逆回购时序冲突。
     """
     date_str = str(trade_date).strip()
     try:
@@ -1725,7 +1730,7 @@ def _trade_timestamp(trade_date: Any, trade_time: Any) -> str:
         raise ValueError("trade_date 必须是 YYYY-MM-DD 格式(至少精确到日期)") from exc
 
     if trade_time in (None, ""):
-        base = base.replace(hour=15, minute=0, second=0)
+        base = base.replace(hour=9, minute=30, second=0)
     else:
         parsed = None
         for fmt in ("%H:%M:%S", "%H:%M"):
@@ -1737,7 +1742,7 @@ def _trade_timestamp(trade_date: Any, trade_time: Any) -> str:
         if parsed is None:
             raise ValueError("trade_time 必须是 HH:MM 或 HH:MM:SS 格式")
         base = base.replace(hour=parsed.hour, minute=parsed.minute, second=parsed.second)
-    return base.replace(tzinfo=timezone.utc).isoformat()
+    return base.replace(tzinfo=CN_TZ).isoformat()
 
 
 def _required(payload: dict[str, Any], key: str) -> str:

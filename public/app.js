@@ -612,7 +612,7 @@ function renderBlotter() {
     .map(
       (position) => `
       <tr>
-        <td class="sym">${position.symbol}</td>
+        <td class="sym">${position.name && position.name !== position.symbol ? `${position.name}<br><small>${position.symbol}</small>` : position.symbol}</td>
         <td>${findStrategyName(position.strategy_id)}</td>
         <td>${formatNumber(position.quantity)}</td>
         <td>${formatNumber(position.avg_cost)}</td>
@@ -1152,7 +1152,7 @@ function renderStrategyBoard() {
           const weight = sleeve.equity ? position.market_value / sleeve.equity : 0;
           return `
             <tr>
-              <td class="sym">${position.symbol}</td>
+              <td class="sym">${position.name && position.name !== position.symbol ? `${position.name}<br><small>${position.symbol}</small>` : position.symbol}</td>
               <td>${formatNumber(position.quantity)}</td>
               <td>${formatPercent(weight)}</td>
               <td>${formatNumber(position.avg_cost)}</td>
@@ -1335,12 +1335,12 @@ function renderPortfolio() {
         (position) => `
           <div class="portfolio-row">
             <div>
-              <strong>${position.symbol}</strong>
-              <span>${position.sleeve_name} · ${position.quantity} shares</span>
+              <strong>${position.name && position.name !== position.symbol ? position.name : ""} <span class="pos-code">${position.symbol}</span></strong>
+              <span>${position.sleeve_name} · ${position.quantity} 股 · 成本 ${formatNumber(position.avg_cost)} · 现价 ${formatNumber(position.mark_price)}</span>
             </div>
             <div>
               <strong>${formatNumber(position.market_value)}</strong>
-              <span class="${numberClass(position.unrealized_pnl)}">${formatNumber(position.unrealized_pnl)} · mark ${formatNumber(position.mark_price)}</span>
+              <span class="${numberClass(position.unrealized_pnl)}">${formatNumber(position.unrealized_pnl)} (${formatPercent(position.unrealized_pnl_pct)})</span>
             </div>
           </div>
         `,
@@ -2009,7 +2009,7 @@ function findTimingName(timingStrategyId) {
 
 function formatTime(value) {
   if (!value) return "--";
-  return value.replace("T", " ").replace("+08:00", "");
+  return value.replace("T", " ").replace("+08:00", "").replace("+00:00", "");
 }
 
 function formatNumber(value) {
