@@ -75,6 +75,10 @@ function switchView(view) {
     renderBtChart(state.backtest);
     setTimeout(() => btChartState.chart && btChartState.chart.timeScale().fitContent(), 60);
   }
+  // 回测与模拟盘是分开的:回测页不显示"当前在跑账户"的账户条(选择器+实时指标)。
+  const hideAccount = view === "backtest";
+  document.querySelector(".account-switch").style.display = hideAccount ? "none" : "";
+  document.querySelector(".ticker-strip").style.display = hideAccount ? "none" : "";
 }
 
 const $ = (id) => document.getElementById(id);
