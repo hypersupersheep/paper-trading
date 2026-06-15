@@ -175,13 +175,21 @@ const perfCharts = { equity: null, drawdown: null };
 
 async function loadPerformance() {
   const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || "";
+  const markSource = $("perfBenchSource").value || ticketSource();
+  // 净值曲线现按真实账本重建,盯市用该数据源(基准也用它)。
+  if (accountId) {
+    // 自动补全闲置资金的逐日逆回购记录(幂等),让逆回购面板与曲线一致。
+    await postJson(`/api/accounts/${encodeURIComponent(accountId)}/reverse-repo/reconcile`, { data_source: markSource }).catch(() => {});
+  }
   const params = new URLSearchParams();
   if (accountId) params.set("account_id", accountId);
-  params.set("benchmark_source", $("perfBenchSource").value || ticketSource());
+  params.set("data_source", markSource);
+  params.set("benchmark_source", markSource);
   const data = await fetchJson(`/api/portfolio/performance?${params}`);
   state.performance = data;
   renderPerfMetrics(data);
   renderPerfCharts(data);
+  await loadReverseRepo().catch(() => {});
 }
 
 function renderPerfMetrics(data) {

@@ -1356,6 +1356,54 @@ class TradingStore:
                 ),
             )
 
+    def sync_auto_repo(self, account_id: str, schedule: list[dict[str, Any]]) -> dict[str, Any]:
+        """把 NAV 重建算出的逐日逆回购计划补进独立账本(source=auto)。
+
+        幂等:已存在该日记录(手动或自动)就跳过,不覆盖手动条目。供"自动补全逆回购"用。
+        """
+        if not self.get_account(account_id):
+            raise ValueError(f"unknown account_id: {account_id}")
+        inserted = 0
+        new_interest = 0.0
+        with self._connection() as conn:
+            existing = {
+                row["trade_date"]
+                for row in conn.execute(
+                    "SELECT trade_date FROM reverse_repo_records WHERE account_id = ?", (account_id,)
+                ).fetchall()
+            }
+            for entry in schedule:
+                day = str(entry["trade_date"])
+                if day in existing:
+                    continue
+                interest = round(float(entry.get("interest", 0.0)), 2)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO reverse_repo_records (
+                        id, account_id, trade_date, timestamp, invest_amount, annual_rate, interest, source
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'auto')
+                    """,
+                    (
+                        f"repo_{uuid.uuid4().hex[:12]}",
+                        account_id,
+                        day,
+                        entry.get("timestamp") or f"{day}T14:30:00+08:00",
+                        round(float(entry.get("principal", 0.0)), 2),
+                        float(entry.get("annual_rate", 0.0)),
+                        interest,
+                        ),
+                )
+                inserted += 1
+                new_interest += interest
+            # 新补入的利息计入账户未分配现金(幂等:只计新增,重跑不重复计)。
+            if new_interest:
+                conn.execute(
+                    "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
+                    (round(new_interest, 2), account_id),
+                )
+        return {"filled": inserted, "total": len(schedule), "credited_interest": round(new_interest, 2)}
+
     def list_reverse_repo(self, account_id: str, limit: int = 750) -> dict[str, Any]:
         """逆回购面板数据:逐日记录 + 汇总(累计投入次数、累计利息)。"""
         with self._connection() as conn:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +16,8 @@ from backend.backtest_store import BacktestStore
 from backend.chart_service import ChartService
 from backend.connector_settings import mask_secret, save_connector_settings
 from backend.data_connectors import normalize_frequency
-from backend.performance_store import PerformanceStore
+from backend.nav_reconstruction import reconstruct as reconstruct_nav
+from backend.performance_store import PerformanceStore, metrics_from_curve
 from backend.risk_store import RiskStore
 from backend.scheduler_store import SchedulerStore
 from backend.strategy_store import StrategyStore
@@ -283,6 +285,14 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 sleeve_id = unquote(path.removeprefix("/api/sleeves/").removesuffix("/allocation").strip("/"))
                 self._json({"sleeve": self.trading.adjust_sleeve_allocation(sleeve_id, payload)}, HTTPStatus.CREATED)
                 return
+            if path.startswith("/api/accounts/") and path.endswith("/reverse-repo/reconcile"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/reverse-repo/reconcile").strip("/"))
+                account = self.trading.get_account(account_id)
+                if not account:
+                    raise ValueError(f"unknown account_id: {account_id}")
+                recon = self._reconstruct_nav(account, payload.get("data_source") or "fixture")
+                self._json(self.trading.sync_auto_repo(account_id, recon["repo_schedule"]), HTTPStatus.CREATED)
+                return
             if path.startswith("/api/accounts/") and path.endswith("/reverse-repo"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/reverse-repo").strip("/"))
                 self._json(self.trading.run_reverse_repo(account_id, payload), HTTPStatus.CREATED)
@@ -451,16 +461,71 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("no account available")
         return accounts[0]["id"]
 
+    @staticmethod
+    def _today_cn() -> str:
+        return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+    def _reconstruct_nav(self, account: dict, data_source: str) -> dict:
+        """从账本(成交+现金流)重建净值曲线 + 逐日逆回购计划。供绩效展示与逆回购补全共用。"""
+        account_id = account["id"]
+        trade_events = self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
+        fills = [
+            {
+                "timestamp": e["timestamp"],
+                "symbol": e["symbol"],
+                "side": (e.get("metadata") or {}).get("side", "BUY"),
+                "quantity": e["quantity"],
+                "price": e["price"],
+            }
+            for e in trade_events
+            if e.get("symbol") and e.get("quantity") and e.get("price")
+        ]
+        cash_events = self.store.list_events({"ledger_type": "cash", "account_id": account_id, "limit": 100000})
+        skip = {"sleeve_allocation", "sleeve_allocation_adjusted"}
+        cash_flows = [
+            {"timestamp": e["timestamp"], "amount": e["amount"]}
+            for e in cash_events
+            if e.get("amount") is not None
+            and e["event_type"] not in skip
+            and not str(e["event_type"]).startswith("reverse_repo")
+        ]
+        today = self._today_cn()
+        daily_closes: dict[str, dict[str, float]] = {}
+        symbols = sorted({str(f["symbol"]).upper() for f in fills})
+        if fills and symbols:
+            start_date = min(str(f["timestamp"])[:10] for f in fills)
+            try:
+                connector = self.strategies.connectors.get(data_source or "fixture")
+                bars = connector.get_bars(symbols, frequency="1d", limit=2000, start=start_date, end=today)
+                for bar in bars:
+                    sym = str(bar["symbol"]).upper()
+                    daily_closes.setdefault(sym, {})[str(bar["timestamp"])[:10]] = float(bar["close"])
+            except Exception:  # noqa: BLE001 - 盯市取数失败就用成交价兜底
+                daily_closes = {}
+        return reconstruct_nav(
+            initial_cash=account["initial_cash"],
+            fills=fills,
+            cash_flows=cash_flows,
+            daily_closes=daily_closes,
+            repo_annual_rate=account["reverse_repo_annual_rate"],
+            today=today,
+            repo_enabled=bool(account["auto_reverse_repo_enabled"]),
+        )
+
     def _performance(self, query: dict) -> dict:
         account_id = self._resolve_account_id(query.get("account_id"))
         account = self.trading.get_account(account_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        result = self.performance.compute_metrics(account_id, account["initial_cash"])
-        trades = self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
+        recon = self._reconstruct_nav(account, query.get("data_source") or "fixture")
+        result = metrics_from_curve(recon["curve"], account["initial_cash"])
         result["account_id"] = account_id
         result["account_name"] = account["name"]
-        result["trade_count"] = len(trades)
+        result["start_date"] = recon["start_date"]
+        result["repo_interest_total"] = round(sum(r["interest"] for r in recon["repo_schedule"]), 2)
+        result["trade_count"] = len(
+            self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
+        )
 
         # 基准叠加(默认沪深300):best-effort,拉不到/对不齐就返回 None,前端只画策略曲线。
         benchmark_symbol = (query.get("benchmark") or "000300.SH").upper()
