@@ -1930,10 +1930,18 @@ tbody tr.selected {
 }
 
 /* 国债逆回购记录面板 */
+/* 逆回购面板:让记录列表填满整个面板高度(被 grid 拉高时不再卡在小框、下面空着),
+   记录很多时再内部滚动。 */
+#repoRecordsPanel {
+  display: flex;
+  flex-direction: column;
+}
 .repo-records {
   display: flex;
   flex-direction: column;
-  max-height: 260px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 70vh;
   overflow-y: auto;
 }
 .repo-row {
