@@ -1,0 +1,45 @@
+name: build
+
+# 云端构建桌面 app:同时产出 macOS(.app)与 Windows(.exe)精简版。
+# 触发:推到 main、打 v* 标签、或在 Actions 页面手动 Run。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: PaperTrading-macos
+          - os: windows-latest
+            artifact: PaperTrading-windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 只装打包必需的两个依赖。重数据源依赖(mootdx/pandas/rqdatac/pymysql)
+      # 已在 paper_trading.spec 的 excludes 里排除,精简版用不到,装了反而拖慢/可能失败。
+      - name: Install build deps
+        run: python -m pip install --upgrade pip pywebview pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --clean paper_trading.spec
+
+      # dist/ 里:macOS 会同时有 PaperTrading/ 和 PaperTrading.app;Windows 是 PaperTrading\PaperTrading.exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+          if-no-files-found: error
