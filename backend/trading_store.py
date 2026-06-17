@@ -290,6 +290,64 @@ class TradingStore:
             )
         return self.get_account(account["id"]) or account
 
+    def update_account(self, account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """更新已有账户的可改配置(摩擦/滑点/逆回购/账户名)。
+
+        initial_cash 不可改:它是净值基线、且现金已按它分配,事后改会让账本对不上。
+        改动只对**之后的**成交生效;已结算的历史成交保留当时的费用,不回溯。
+        """
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"unknown account_id: {account_id}")
+
+        updatable = {
+            "name": lambda v: str(v).strip() or account["name"],
+            "commission_rate": lambda v: _float(v, account["commission_rate"]),
+            "min_commission": lambda v: _float(v, account["min_commission"]),
+            "stamp_duty_rate": lambda v: _float(v, account["stamp_duty_rate"]),
+            "slippage_model": lambda v: str(v),
+            "slippage_value": lambda v: _float(v, account["slippage_value"]),
+            "reverse_repo_annual_rate": lambda v: _float(v, account["reverse_repo_annual_rate"]),
+        }
+        changes: dict[str, Any] = {}
+        for field, coerce in updatable.items():
+            if field in payload and payload[field] is not None:
+                new_value = coerce(payload[field])
+                if new_value != account[field]:
+                    changes[field] = new_value
+        if "auto_reverse_repo_enabled" in payload:
+            new_flag = 1 if payload["auto_reverse_repo_enabled"] else 0
+            if new_flag != account["auto_reverse_repo_enabled"]:
+                changes["auto_reverse_repo_enabled"] = new_flag
+
+        if changes.get("slippage_model", account["slippage_model"]) not in {"bps", "fixed_tick", "adaptive"}:
+            raise ValueError("slippage_model must be bps, fixed_tick or adaptive")
+        for rate_field in ("commission_rate", "stamp_duty_rate", "reverse_repo_annual_rate", "slippage_value"):
+            if rate_field in changes and changes[rate_field] < 0:
+                raise ValueError(f"{rate_field} 不能为负")
+
+        if not changes:
+            return account
+
+        before = {field: account[field] for field in changes}
+        assignments = ", ".join(f"{field} = ?" for field in changes)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE accounts SET {assignments} WHERE id = ?",
+                (*changes.values(), account_id),
+            )
+        self.audit_store.record_event(
+            AuditEvent(
+                timestamp=_now(),
+                ledger_type="system",
+                event_type="account_updated",
+                account_id=account_id,
+                reason="account config updated",
+                metadata={"changed": list(changes.keys()), "before": before, "after": changes},
+            )
+        )
+        return self.get_account(account_id) or account
+
     def create_sleeve(self, account_id: str, payload: dict[str, Any], *, seed: bool = False) -> dict[str, Any]:
         account = self.get_account(account_id)
         if not account:
@@ -513,6 +571,122 @@ class TradingStore:
             "id": account_id,
             "removed": {"sleeves": len(sleeves), "positions": position_count},
         }
+
+    def void_trade(self, account_id: str, trade_event_id: str, reason: str) -> dict[str, Any]:
+        """作废一笔错误成交:反向冲回它对现金/持仓的影响,使账本与净值"如同该笔从未发生"。
+
+        与"反向补录"不同——后者会在曲线上留下一笔虚假往返+费用。作废是把这笔从所有派生
+        (净值重建/流水/盈亏)里彻底剔除。护栏:必须填原因;只能作废真实成交;不能重复作废;
+        且整个动作以 trade_voided 事件记入 append-only 审计流水(可追溯、不可悄悄删)。
+        """
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("作废交易必须填写原因")
+        trade = self.audit_store.get_event(trade_event_id)
+        if not trade or trade.get("event_type") != "trade_filled":
+            raise ValueError("未找到该成交事件,无法作废")
+        if trade.get("account_id") != account_id:
+            raise ValueError("该成交不属于此账户")
+        if trade_event_id in self.audit_store.voided_trade_event_ids(account_id):
+            raise ValueError("该成交已作废,请勿重复操作")
+
+        sleeve_id = trade["sleeve_id"]
+        symbol = trade["symbol"]
+        side = str((trade.get("metadata") or {}).get("side") or "BUY").upper()
+        qty = int(trade["quantity"])
+        price = float(trade["price"])
+        gross = round(qty * price, 2)
+        chain = self.audit_store.get_chain(trade_event_id)
+        fees = round(
+            sum(-float(e.get("amount") or 0.0) for e in chain.get("cash_changes", [])
+                if e["event_type"] in {"commission", "stamp_duty", "slippage"}),
+            2,
+        )
+        # 原始这笔对 sleeve 现金的影响:BUY 减 gross+fees;SELL 加 gross-fees。作废=反向冲回。
+        original_cash_delta = (-(gross) - fees) if side == "BUY" else (gross - fees)
+
+        # 先把作废事件记入审计(此后 voided 集合即含本笔),再据"剩余未作废成交"重算持仓。
+        self.audit_store.record_event(
+            AuditEvent(
+                timestamp=_now(),
+                ledger_type="system",
+                event_type="trade_voided",
+                account_id=account_id,
+                sleeve_id=sleeve_id,
+                strategy_id=trade.get("strategy_id"),
+                symbol=symbol,
+                quantity=qty,
+                price=price,
+                amount=gross,
+                reason=reason,
+                source_event_id=trade.get("source_event_id"),
+                metadata={
+                    "trade_event_id": trade_event_id,
+                    "side": side,
+                    "fees": fees,
+                    "reversed_cash": round(-original_cash_delta, 2),
+                },
+            )
+        )
+
+        new_qty, new_avg = self._replay_position(account_id, sleeve_id, symbol)
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE sleeves SET available_cash = ROUND(available_cash - ?, 2) WHERE id = ?",
+                (original_cash_delta, sleeve_id),
+            )
+            if new_qty > 0:
+                conn.execute(
+                    "UPDATE positions SET quantity = ?, avg_cost = ?, updated_at = ? "
+                    "WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
+                    (new_qty, round(new_avg, 4), _now(), account_id, sleeve_id, symbol),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM positions WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
+                    (account_id, sleeve_id, symbol),
+                )
+        return {
+            "voided": True,
+            "trade_event_id": trade_event_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": qty,
+            "reversed_cash": round(-original_cash_delta, 2),
+            "position_after": new_qty,
+        }
+
+    def _replay_position(self, account_id: str, sleeve_id: str, symbol: str) -> tuple[int, float]:
+        """按时间顺序重放该 sleeve+symbol 的未作废成交,得到(数量, 平均成本)。"""
+        voided = self.audit_store.voided_trade_event_ids(account_id)
+        fills = self.audit_store.list_events(
+            {
+                "event_type": "trade_filled",
+                "account_id": account_id,
+                "sleeve_id": sleeve_id,
+                "symbol": symbol,
+                "limit": "100000",
+            }
+        )
+        fills.sort(key=lambda e: (e["timestamp"], e["id"]))
+        qty = 0
+        avg = 0.0
+        for fill in fills:
+            if fill["id"] in voided:
+                continue
+            fq = int(fill["quantity"])
+            fp = float(fill["price"])
+            fside = str((fill.get("metadata") or {}).get("side") or "BUY").upper()
+            if fside == "BUY":
+                total = qty + fq
+                avg = (avg * qty + fp * fq) / total if total else 0.0
+                qty = total
+            else:
+                qty -= fq
+                if qty <= 0:
+                    qty = 0
+                    avg = 0.0
+        return qty, avg
 
     def list_sleeves(self, account_id: str) -> list[dict[str, Any]]:
         with self._connection() as conn:
@@ -1517,6 +1691,7 @@ class TradingStore:
         market_value = 0.0
         cost_basis = 0.0
         unrealized_pnl = 0.0
+        holdings_day_pnl = 0.0
 
         for sleeve in sleeves:
             sleeve_positions = []
@@ -1530,6 +1705,7 @@ class TradingStore:
                 sleeve_market_value += enriched["market_value"]
                 sleeve_cost_basis += enriched["cost_basis"]
                 sleeve_unrealized_pnl += enriched["unrealized_pnl"]
+                holdings_day_pnl += enriched.get("day_pnl") or 0.0
 
             sleeve_available_cash = _money(sleeve["available_cash"])
             sleeve_allocated_cash = _money(sleeve["allocated_cash"])
@@ -1577,6 +1753,7 @@ class TradingStore:
             "market_value": _money(market_value),
             "cost_basis": _money(cost_basis),
             "unrealized_pnl": _money(unrealized_pnl),
+            "holdings_day_pnl": _money(holdings_day_pnl),
             "equity": equity,
             "pnl": pnl,
             "pnl_pct": _ratio(pnl, account["initial_cash"]),
@@ -1881,6 +2058,9 @@ def _enrich_position(
     market_value = _money(quantity * mark_price)
     cost_basis = _money(quantity * avg_cost)
     unrealized_pnl = _money(market_value - cost_basis)
+    prev_close = mark.get("prev_close")
+    # 当日盈亏:盯市价相对昨收的变动 × 持仓量(昨收缺失则记 0)。
+    day_pnl = _money(quantity * (mark_price - float(prev_close))) if prev_close else 0.0
     return {
         "account_id": account_id,
         "sleeve_id": sleeve["id"],
@@ -1900,6 +2080,8 @@ def _enrich_position(
         "cost_basis": cost_basis,
         "unrealized_pnl": unrealized_pnl,
         "unrealized_pnl_pct": _ratio(unrealized_pnl, cost_basis),
+        "prev_close": float(prev_close) if prev_close else None,
+        "day_pnl": day_pnl,
         "updated_at": position["updated_at"],
     }
 

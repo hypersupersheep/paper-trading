@@ -46,6 +46,7 @@
           </div>
           <div class="ticker-strip">
             <div class="ticker"><span>账户权益</span><strong id="tickerEquity">--</strong></div>
+            <div class="ticker"><span>当日盈亏</span><strong id="tickerDayPnl">--</strong></div>
             <div class="ticker"><span>总盈亏</span><strong id="tickerPnl">--</strong></div>
             <div class="ticker"><span>可用现金</span><strong id="tickerCash">--</strong></div>
             <div class="ticker"><span>持仓市值</span><strong id="tickerMv">--</strong></div>
@@ -104,6 +105,10 @@
           <div>
             <span>账户权益</span>
             <strong id="portfolioEquity">--</strong>
+          </div>
+          <div>
+            <span>当日盈亏</span>
+            <strong id="portfolioDayPnl">--</strong>
           </div>
           <div>
             <span>总盈亏</span>
@@ -315,6 +320,9 @@
             <h2>账户配置</h2>
             <span>Account</span>
           </div>
+          <label class="edit-target-row">编辑对象
+            <select id="accountEditTarget"><option value="">＋ 新建账户</option></select>
+          </label>
           <div class="form-grid">
             <label>账户名<input id="newAccountName" value="A-Share Test" /></label>
             <label>初始资金<input id="newInitialCash" type="number" value="10000000" /></label>
@@ -324,7 +332,8 @@
             <label>滑点强度 η<input id="newSlippageValue" type="number" step="0.1" value="1" /></label>
             <label>逆回购年化<input id="newRepoRate" type="number" step="0.001" value="0.018" /></label>
           </div>
-          <button class="primary" type="submit">创建账户</button>
+          <div id="accountEditHint" class="form-hint" hidden>编辑现有账户:初始资金锁定;改动只对之后的成交生效。</div>
+          <button id="accountSubmitBtn" class="primary" type="submit">创建账户</button>
           <div class="account-delete-row">
             <select id="deleteAccountSelect"></select>
             <button type="button" id="deleteAccountBtn" class="danger-btn">删除该账户</button>
@@ -707,8 +716,8 @@ def on_bar(ctx, bar):
       <section class="panel pnl-board" data-view="replay">
         <div class="panel-head">
           <div>
-            <h2>个股盈亏看台</h2>
-            <span>历史买卖的已实现盈亏(平均成本法,卖出时结转)</span>
+            <h2>历史个股盈亏</h2>
+            <span>已清仓个股的已实现盈亏(平均成本法;仍持仓的归"组合概览")</span>
           </div>
           <div class="pnl-head-right">
             <div class="seg" id="pnlSort">

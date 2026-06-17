@@ -2256,3 +2256,56 @@ td.muted,
   background: var(--accent);
   color: #fff;
 }
+
+/* 账户配置:编辑对象选择 + 提示 */
+.edit-target-row {
+  margin-bottom: 10px;
+}
+.form-hint {
+  font-size: 11.5px;
+  color: var(--warn);
+  margin: -4px 0 10px;
+}
+input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 当日盈亏 ticker 占位 */
+.ticker-muted {
+  color: var(--muted);
+}
+
+/* 交易流水:作废按钮 + 已作废行 */
+.status-cell {
+  white-space: nowrap;
+}
+.void-btn {
+  margin-left: 10px;
+  padding: 2px 9px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.12s;
+  opacity: 0;
+}
+tbody tr:hover .void-btn {
+  opacity: 1;
+}
+.void-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.voided-row td {
+  opacity: 0.45;
+  text-decoration: line-through;
+  text-decoration-color: var(--muted);
+}
+.voided-row td.status-cell {
+  text-decoration: none;
+  opacity: 1;
+}

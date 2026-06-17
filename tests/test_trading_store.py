@@ -737,6 +737,114 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(row["realized_pnl"], sell["realized_pnl"])
         self.assertEqual(board["total_realized_pnl"], sell["realized_pnl"])
 
+    def test_update_account_changes_config_keeps_initial_cash(self) -> None:
+        updated = self.trading.update_account(
+            "acct_test",
+            {
+                "name": "改名后",
+                "slippage_model": "fixed_tick",
+                "slippage_value": 0.0,
+                "commission_rate": 0.0001,
+                "initial_cash": 9_999,  # 应被忽略(不可改)
+            },
+        )
+        self.assertEqual(updated["name"], "改名后")
+        self.assertEqual(updated["slippage_model"], "fixed_tick")
+        self.assertEqual(updated["slippage_value"], 0.0)
+        self.assertEqual(updated["commission_rate"], 0.0001)
+        self.assertEqual(updated["initial_cash"], 1_000_000)  # 初始资金锁定
+        # 审计留痕
+        events = self.audit.list_events({"account_id": "acct_test", "event_type": "account_updated"})
+        self.assertEqual(len(events), 1)
+        self.assertIn("slippage_model", events[0]["metadata"]["changed"])
+        with self.assertRaises(ValueError):
+            self.trading.update_account("acct_test", {"slippage_model": "bogus"})
+
+    def test_void_trade_reverses_cash_and_position_and_records(self) -> None:
+        cash0 = self.trading.get_sleeve("sleeve_test")["available_cash"]
+        self.trading.place_order(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "strategy_id": "strategy_test",
+                "run_id": "run_bad",
+                "symbol": "600519.SH",
+                "side": "BUY",
+                "quantity": 100,
+                "signal_price": 100,
+                "fill_price": 100,
+                "source_event_id": "sig_bad",
+            }
+        )
+        self.assertEqual(self.trading.list_positions("sleeve_test")[0]["quantity"], 100)
+        trade = next(t for t in self.audit.trade_summaries({"account_id": "acct_test"}) if t["kind"] == "trade")
+
+        with self.assertRaises(ValueError):  # 必须填原因
+            self.trading.void_trade("acct_test", trade["id"], "  ")
+        res = self.trading.void_trade("acct_test", trade["id"], "agent 下错单,价格离谱")
+        self.assertTrue(res["voided"])
+        # 持仓清掉、现金(含费用)还原
+        self.assertEqual(self.trading.list_positions("sleeve_test"), [])
+        self.assertEqual(self.trading.get_sleeve("sleeve_test")["available_cash"], cash0)
+        # 作废留痕 + 不可重复作废
+        self.assertIn(trade["id"], self.audit.voided_trade_event_ids("acct_test"))
+        self.assertEqual(len(self.audit.list_events({"account_id": "acct_test", "event_type": "trade_voided"})), 1)
+        with self.assertRaises(ValueError):
+            self.trading.void_trade("acct_test", trade["id"], "再来一次")
+        voided_row = next(t for t in self.audit.trade_summaries({"account_id": "acct_test"}) if t["id"] == trade["id"])
+        self.assertTrue(voided_row["voided"])
+
+    def test_realized_pnl_excludes_currently_held_symbols(self) -> None:
+        # 600519 清仓 → 进历史;000001 仍持仓 → 不进历史。
+        for side, sym, qty, px, sid in [
+            ("BUY", "600519.SH", 100, 100, "h1"),
+            ("SELL", "600519.SH", 100, 120, "h2"),
+            ("BUY", "000001.SZ", 200, 10, "h3"),
+            ("SELL", "000001.SZ", 100, 11, "h4"),
+        ]:
+            self.trading.place_order(
+                {
+                    "account_id": "acct_test",
+                    "sleeve_id": "sleeve_test",
+                    "strategy_id": "strategy_test",
+                    "run_id": sid,
+                    "symbol": sym,
+                    "side": side,
+                    "quantity": qty,
+                    "signal_price": px,
+                    "fill_price": px,
+                    "source_event_id": sid,
+                }
+            )
+        held = set(self.trading.list_position_symbols("acct_test"))
+        self.assertIn("000001.SZ", held)
+        board = self.audit.realized_pnl_by_symbol({"account_id": "acct_test"}, exclude_symbols=held)
+        syms = [r["symbol"] for r in board["symbols"]]
+        self.assertIn("600519.SH", syms)
+        self.assertNotIn("000001.SZ", syms)
+
+    def test_day_pnl_from_prev_close(self) -> None:
+        self.trading.place_order(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "strategy_id": "strategy_test",
+                "run_id": "d1",
+                "symbol": "600519.SH",
+                "side": "BUY",
+                "quantity": 100,
+                "signal_price": 100,
+                "fill_price": 100,
+                "source_event_id": "sig_d1",
+            }
+        )
+        summary = self.trading.get_portfolio_summary(
+            "acct_test", mark_prices={"600519.SH": {"price": 110, "prev_close": 105}}
+        )
+        account = summary["accounts"][0]
+        self.assertEqual(account["holdings_day_pnl"], 500.0)  # 100*(110-105)
+        self.assertEqual(account["positions"][0]["day_pnl"], 500.0)
+
     def test_sync_auto_repo_skips_today_and_self_heals_premature_record(self) -> None:
         from backend.trading_store import _today_cn
 

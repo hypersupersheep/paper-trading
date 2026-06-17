@@ -476,6 +476,22 @@ class AuditStore:
             "all_events": events,
         }
 
+    def voided_trade_event_ids(self, account_id: str | None = None) -> set[str]:
+        """已作废成交的 trade_event_id 集合(从 append-only 的 trade_voided 事件派生)。
+
+        作废不物理删除任何审计行,而是追加一条 trade_voided 记录;净值重建/流水/盈亏一律
+        据此把被作废的成交排除在外,使曲线"如同该笔从未发生"。
+        """
+        filters: dict[str, str | None] = {"event_type": "trade_voided", "limit": "100000"}
+        if account_id:
+            filters["account_id"] = account_id
+        voided: set[str] = set()
+        for event in self.list_events(filters):
+            tid = (event.get("metadata") or {}).get("trade_event_id")
+            if tid:
+                voided.add(str(tid))
+        return voided
+
     def trade_summaries(self, filters: dict[str, str | None] | None = None) -> list[dict[str, Any]]:
         """把"一笔交易/一只股票"引起的整条审计流水折叠成一行,并补上股票名称。
 
@@ -489,6 +505,7 @@ class AuditStore:
         action_limit = int(filters.get("limit") or 300)
         # 放宽底层拉取量,确保同一笔的子事件能凑齐再折叠。
         raw = self.list_events({**filters, "event_type": None, "limit": max(action_limit * 12, 4000)})
+        voided = self.voided_trade_event_ids(filters.get("account_id"))
 
         by_root: dict[str, list[dict[str, Any]]] = {}
         for event in raw:
@@ -519,6 +536,7 @@ class AuditStore:
                     (trade.get("metadata") or {}).get("backfill")
                     or any(e["event_type"] == "trade_backfill_declared" for e in group)
                 )
+                is_voided = trade["id"] in voided
                 rows.append(
                     {
                         "kind": "trade",
@@ -538,8 +556,9 @@ class AuditStore:
                         "net_cash": net_cash,
                         "position_after": pos_after,
                         "avg_cost_before": round(avg_before, 4) if avg_before else None,
-                        "realized_pnl": realized,
+                        "realized_pnl": None if is_voided else realized,
                         "backfill": backfill,
+                        "voided": is_voided,
                         "reason": trade.get("reason"),
                     }
                 )
@@ -581,14 +600,26 @@ class AuditStore:
         rows.sort(key=lambda r: r["timestamp"], reverse=True)
         return rows[:action_limit]
 
-    def realized_pnl_by_symbol(self, filters: dict[str, str | None] | None = None) -> dict[str, Any]:
-        """按个股汇总历史买卖的已实现盈亏(平均成本法,卖出时结转)。供日志页的个股盈亏看台。"""
+    def realized_pnl_by_symbol(
+        self,
+        filters: dict[str, str | None] | None = None,
+        *,
+        exclude_symbols: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """按个股汇总历史买卖的已实现盈亏(平均成本法,卖出时结转)。供日志页"历史个股盈亏"看台。
+
+        exclude_symbols:当前仍持仓的标的——它们的盈亏归"现有持仓",不计入历史盈亏。
+        已作废(voided)的成交不参与汇总。
+        """
         rows = self.trade_summaries({**(filters or {}), "limit": 100000})
+        skip = {str(s).upper() for s in (exclude_symbols or set())}
         agg: dict[str, dict[str, Any]] = {}
         for r in rows:
-            if r["kind"] != "trade" or not r.get("symbol"):
+            if r["kind"] != "trade" or not r.get("symbol") or r.get("voided"):
                 continue
             sym = r["symbol"]
+            if str(sym).upper() in skip:
+                continue
             bucket = agg.setdefault(
                 sym,
                 {

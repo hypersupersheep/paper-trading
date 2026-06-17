@@ -1141,6 +1141,15 @@ function renderAccountControls() {
     select.innerHTML = accountOptions;
     if (previous) select.value = previous;
   }
+  // 账户配置"编辑对象":首项为新建,其余为现有账户(保留当前选择)。
+  const editTarget = $("accountEditTarget");
+  if (editTarget) {
+    const prev = editTarget.value;
+    editTarget.innerHTML =
+      '<option value="">＋ 新建账户</option>' +
+      state.accounts.map((account) => `<option value="${account.id}">${account.name}</option>`).join("");
+    editTarget.value = state.accounts.some((a) => a.id === prev) ? prev : "";
+  }
   // 顶栏账户切换器:跟随筛选条选中的账户。
   const topSelect = $("topAccountSelect");
   topSelect.innerHTML = state.accounts.map((account) => `<option value="${account.id}">${account.name}</option>`).join("");
@@ -1176,13 +1185,22 @@ function updateTicker(account) {
     $("sidebarAccountStatus").textContent = account ? `权益 ¥${formatNumber(account.equity)}` : "审计流水正常";
   }
   if (!account) {
-    for (const id of ["tickerEquity", "tickerPnl", "tickerCash", "tickerMv", "tickerExposure"]) {
+    for (const id of ["tickerEquity", "tickerDayPnl", "tickerPnl", "tickerCash", "tickerMv", "tickerExposure"]) {
       $(id).textContent = "--";
       $(id).className = "";
     }
     return;
   }
   $("tickerEquity").textContent = `¥${formatNumber(account.equity)}`;
+  // 当日盈亏:需数据源盯市才有(account.day_pnl);无数据源标记时显示 --。
+  const dayPnl = account.day_pnl;
+  if (dayPnl === null || dayPnl === undefined) {
+    $("tickerDayPnl").textContent = "--";
+    $("tickerDayPnl").className = "ticker-muted";
+  } else {
+    $("tickerDayPnl").textContent = formatSigned(dayPnl);
+    $("tickerDayPnl").className = numberClass(dayPnl);
+  }
   $("tickerPnl").textContent = `${account.pnl >= 0 ? "+" : ""}${formatNumber(account.pnl)} (${formatPercent(account.pnl_pct)})`;
   $("tickerPnl").className = numberClass(account.pnl);
   $("tickerCash").textContent = `¥${formatNumber(account.total_cash)}`;
@@ -1602,6 +1620,13 @@ function renderPortfolio() {
   $("portfolioAccountName").textContent = `${account.name} · ${account.id}`;
   $("portfolioUpdatedAt").textContent = portfolioMarkText(state.portfolio?.mark, account);
   $("portfolioEquity").textContent = formatNumber(account.equity);
+  if (account.day_pnl === null || account.day_pnl === undefined) {
+    $("portfolioDayPnl").textContent = "--";
+    $("portfolioDayPnl").className = "";
+  } else {
+    $("portfolioDayPnl").textContent = formatSigned(account.day_pnl);
+    $("portfolioDayPnl").className = numberClass(account.day_pnl);
+  }
   $("portfolioPnl").textContent = `${formatNumber(account.pnl)} (${formatPercent(account.pnl_pct)})`;
   $("portfolioPnl").className = numberClass(account.pnl);
   $("portfolioCash").textContent = formatNumber(account.total_cash);
@@ -1721,7 +1746,8 @@ function renderTable() {
   }
   for (const t of state.trades) {
     const row = document.createElement("tr");
-    row.className = t.id === state.selectedId ? "selected" : "";
+    const voided = !!t.voided;
+    row.className = [t.id === state.selectedId ? "selected" : "", voided ? "voided-row" : ""].join(" ").trim();
     row.addEventListener("click", () => selectEvent(t.id));
     const [statusLabel, statusKind] = TRADE_STATUS[t.kind] || [t.kind, ""];
     const isTrade = t.kind === "trade";
@@ -1731,6 +1757,15 @@ function renderTable() {
     // 名称未知(后端回退成代码)时不重复显示代码。
     const symCode = t.symbol && t.name && t.name !== t.symbol ? `<span class="sym-code">${escapeHtml(t.symbol)}</span>` : "";
     const backfillTag = t.backfill ? `<span class="mini-tag">补录</span>` : "";
+    // 状态:已作废优先标记;真实成交且未作废 → 提供"作废"入口。
+    let statusCell;
+    if (voided) {
+      statusCell = `<span class="status-dot bad">已作废</span>`;
+    } else if (isTrade) {
+      statusCell = `<span class="status-dot ${statusKind}">${statusLabel}</span><button type="button" class="void-btn" data-void="${t.id}">作废</button>`;
+    } else {
+      statusCell = `<span class="status-dot ${statusKind}" title="${escapeHtml(t.reason || "")}">${statusLabel}</span>`;
+    }
     row.innerHTML = `
       <td class="muted">${formatTime(t.timestamp)}</td>
       <td><span class="sym-name">${symName}</span>${symCode}${backfillTag}</td>
@@ -1740,10 +1775,37 @@ function renderTable() {
       <td class="num">${isTrade ? formatNumber(t.gross_amount) : "--"}</td>
       <td class="num muted">${isTrade ? formatNumber(t.fees) : "--"}</td>
       <td class="num ${numberClass(t.realized_pnl)} strong">${t.realized_pnl !== null && t.realized_pnl !== undefined ? formatSigned(t.realized_pnl) : "--"}</td>
-      <td><span class="status-dot ${statusKind}" title="${escapeHtml(t.reason || "")}">${statusLabel}</span></td>
+      <td class="status-cell">${statusCell}</td>
     `;
+    const voidBtn = row.querySelector(".void-btn");
+    if (voidBtn) {
+      voidBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        voidTrade(t).catch((error) => showToast(error.message));
+      });
+    }
     body.appendChild(row);
   }
+}
+
+async function voidTrade(trade) {
+  const label = `${trade.name || trade.symbol} ${trade.side === "BUY" ? "买入" : "卖出"} ${formatNumber(trade.quantity)} 股 @ ${formatNumber(trade.price)}`;
+  const reason = window.prompt(
+    `作废这笔成交?它会从净值曲线/持仓/盈亏中彻底剔除(如同从未发生),但作废动作会记入审计流水。\n\n${label}\n\n请填写作废原因(必填):`,
+    ""
+  );
+  if (reason === null) return; // 取消
+  if (!reason.trim()) {
+    showToast("必须填写作废原因");
+    return;
+  }
+  const accountId = $("accountFilter").value.trim() || trade.account_id;
+  const res = await postJson(`/api/audit/trades/${encodeURIComponent(trade.id)}/void`, {
+    account_id: accountId,
+    reason: reason.trim(),
+  });
+  showToast(`已作废:冲回现金 ${formatSigned(res.reversed_cash)},剩余持仓 ${formatNumber(res.position_after)}`);
+  await refreshAll();
 }
 
 async function selectEvent(eventId) {
@@ -1834,21 +1896,59 @@ async function refreshAll(selectEventId = null) {
   if (selectEventId) await selectEvent(selectEventId);
 }
 
+function applyAccountEditMode() {
+  // 选中现有账户 → 回填配置进入"编辑"态;选"新建" → 清回默认。
+  const accountId = $("accountEditTarget").value;
+  const cashInput = $("newInitialCash");
+  const btn = $("accountSubmitBtn");
+  const hint = $("accountEditHint");
+  if (!accountId) {
+    btn.textContent = "创建账户";
+    cashInput.disabled = false;
+    hint.hidden = true;
+    return;
+  }
+  const account = state.accounts.find((a) => a.id === accountId);
+  if (!account) return;
+  $("newAccountName").value = account.name;
+  $("newInitialCash").value = account.initial_cash;
+  $("newCommissionRate").value = account.commission_rate;
+  $("newStampDutyRate").value = account.stamp_duty_rate;
+  $("newSlippageModel").value = account.slippage_model;
+  $("newSlippageValue").value = account.slippage_value;
+  $("newRepoRate").value = account.reverse_repo_annual_rate;
+  cashInput.disabled = true; // 初始资金锁定
+  btn.textContent = "应用配置";
+  hint.hidden = false;
+}
+
 async function createAccount(event) {
   event.preventDefault();
-  const data = await postJson("/api/accounts", {
+  const editId = $("accountEditTarget").value;
+  const config = {
     name: $("newAccountName").value.trim(),
-    initial_cash: Number($("newInitialCash").value),
     commission_rate: Number($("newCommissionRate").value),
     stamp_duty_rate: Number($("newStampDutyRate").value),
     slippage_model: $("newSlippageModel").value,
     slippage_value: Number($("newSlippageValue").value),
-    auto_reverse_repo_enabled: true,
     reverse_repo_annual_rate: Number($("newRepoRate").value),
-  });
-  $("accountFilter").value = data.account.id;
-  showToast(`已创建账户 ${data.account.name}`);
+  };
+  if (editId) {
+    // 更新现有账户(initial_cash 不传:后端锁定)。
+    const data = await postJson(`/api/accounts/${encodeURIComponent(editId)}/update`, config);
+    $("accountFilter").value = data.account.id;
+    showToast(`已更新账户 ${data.account.name} 的配置`);
+  } else {
+    const data = await postJson("/api/accounts", {
+      ...config,
+      initial_cash: Number($("newInitialCash").value),
+      auto_reverse_repo_enabled: true,
+    });
+    $("accountFilter").value = data.account.id;
+    showToast(`已创建账户 ${data.account.name}`);
+  }
   await refreshAll();
+  applyAccountEditMode();
 }
 
 async function createSleeve(event) {
@@ -2542,6 +2642,7 @@ $("loadQuote").addEventListener("click", () => loadQuote().catch((error) => show
 $("storagePick").addEventListener("click", () => handleStoragePick().catch((error) => showToast(error.message)));
 $("storageReset").addEventListener("click", () => resetStorageLocation().catch((error) => showToast(error.message)));
 $("accountForm").addEventListener("submit", (event) => createAccount(event).catch((error) => showToast(error.message)));
+$("accountEditTarget").addEventListener("change", applyAccountEditMode);
 $("sleeveForm").addEventListener("submit", (event) => createSleeve(event).catch((error) => showToast(error.message)));
 $("orderForm").addEventListener("submit", (event) => submitOrder(event).catch((error) => showToast(error.message)));
 $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event).catch((error) => showToast(error.message)));

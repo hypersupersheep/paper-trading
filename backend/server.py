@@ -193,7 +193,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 self._json({"trades": trades})
                 return
             if path == "/api/audit/pnl":
-                board = self.store.realized_pnl_by_symbol(query)
+                # 历史个股盈亏:当前仍持仓的标的归"现有持仓",不计入历史。
+                held = set(self.trading.list_position_symbols(query.get("account_id")))
+                board = self.store.realized_pnl_by_symbol(query, exclude_symbols=held)
                 self._fill_trade_names(query.get("data_source"), board["symbols"])
                 self._json(board)
                 return
@@ -275,6 +277,18 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/accounts/") and path.endswith("/delete"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/delete").strip("/"))
                 self._json(self.trading.delete_account(account_id, payload), HTTPStatus.CREATED)
+                return
+            if path.startswith("/api/accounts/") and path.endswith("/update"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/update").strip("/"))
+                self._json({"account": self.trading.update_account(account_id, payload)}, HTTPStatus.CREATED)
+                return
+            if path.startswith("/api/audit/trades/") and path.endswith("/void"):
+                trade_event_id = unquote(path.removeprefix("/api/audit/trades/").removesuffix("/void").strip("/"))
+                account_id = payload.get("account_id") or self._resolve_account_id(None)
+                self._json(
+                    self.trading.void_trade(account_id, trade_event_id, payload.get("reason", "")),
+                    HTTPStatus.CREATED,
+                )
                 return
             if path.startswith("/api/strategies/") and path.endswith("/run"):
                 strategy_id = unquote(path.removeprefix("/api/strategies/").removesuffix("/run").strip("/"))
@@ -392,6 +406,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             for bar in bars:
                 symbol = str(bar["symbol"]).upper()
                 closes_by_symbol.setdefault(symbol, []).append((str(bar.get("timestamp")), float(bar["close"])))
+            # 昨收(当日盈亏基线):取日线倒数第二根的收盘。best-effort,取不到则该标的当日盈亏记 0。
+            prev_close = self._prev_close_map(connector, symbols)
             for symbol, series in closes_by_symbol.items():
                 series.sort(key=lambda item: item[0])
                 timestamp, price = series[-1]
@@ -401,8 +417,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                     "data_source": data_source,
                     "frequency": frequency,
                     "volatility": _bar_volatility([close for _, close in series]),
+                    "prev_close": prev_close.get(symbol),
                 }
-        return self.trading.get_portfolio_summary(
+        summary = self.trading.get_portfolio_summary(
             account_id,
             mark_prices=mark_prices,
             mark_metadata={
@@ -414,6 +431,42 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "connector": connector.healthcheck(),
             },
         )
+        self._attach_day_pnl(summary)
+        return summary
+
+    def _attach_day_pnl(self, summary: dict) -> None:
+        """当日盈亏 = 持仓今日浮盈变动(盯市价 vs 昨收) + 今日已实现(今日卖出结转)。"""
+        today = self._today_cn()
+        for account in summary.get("accounts", []):
+            holdings = float(account.get("holdings_day_pnl") or 0.0)
+            realized_today = 0.0
+            for row in self.store.trade_summaries({"account_id": account["id"], "limit": 100000}):
+                if (
+                    row.get("kind") == "trade"
+                    and not row.get("voided")
+                    and row.get("realized_pnl") is not None
+                    and str(row.get("timestamp"))[:10] == today
+                ):
+                    realized_today += float(row["realized_pnl"])
+            account["day_realized_pnl"] = round(realized_today, 2)
+            account["day_pnl"] = round(holdings + realized_today, 2)
+
+    def _prev_close_map(self, connector: Any, symbols: list[str]) -> dict[str, float]:
+        """各标的昨收(日线倒数第二根收盘)。取不到就缺省,不影响盯市。"""
+        out: dict[str, float] = {}
+        try:
+            bars = connector.get_bars(symbols, frequency="1d", limit=2)
+        except Exception:  # noqa: BLE001
+            return out
+        series: dict[str, list[tuple[str, float]]] = {}
+        for bar in bars:
+            sym = str(bar["symbol"]).upper()
+            series.setdefault(sym, []).append((str(bar.get("timestamp")), float(bar["close"])))
+        for sym, items in series.items():
+            items.sort(key=lambda x: x[0])
+            if len(items) >= 2:
+                out[sym] = items[-2][1]
+        return out
 
     @staticmethod
     def _default_home():
@@ -511,6 +564,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         """从账本(成交+现金流)重建净值曲线 + 逐日逆回购计划。供绩效展示与逆回购补全共用。"""
         account_id = account["id"]
         trade_events = self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
+        voided = self.store.voided_trade_event_ids(account_id)
         fills = [
             {
                 "timestamp": e["timestamp"],
@@ -520,7 +574,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "price": e["price"],
             }
             for e in trade_events
-            if e.get("symbol") and e.get("quantity") and e.get("price")
+            if e.get("symbol") and e.get("quantity") and e.get("price") and e["id"] not in voided
         ]
         cash_events = self.store.list_events({"ledger_type": "cash", "account_id": account_id, "limit": 100000})
         skip = {"sleeve_allocation", "sleeve_allocation_adjusted"}
@@ -530,6 +584,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if e.get("amount") is not None
             and e["event_type"] not in skip
             and not str(e["event_type"]).startswith("reverse_repo")
+            and (e.get("metadata") or {}).get("trade_event_id") not in voided
         ]
         today = self._today_cn()
         daily_closes: dict[str, dict[str, float]] = {}
