@@ -360,6 +360,27 @@ class AuditStore:
         )
         return ids
 
+    def net_position_asof(self, account_id: str, sleeve_id: str, symbol: str, as_of_ts: str) -> int:
+        """按成交事件时序重建该 (账户, sleeve, 标的) 截至 as_of_ts(含)的净持仓股数。
+
+        用于补录卖出的时序校验:不能卖出"该交易日当时还没买入"的量。
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT quantity, json_extract(metadata, '$.side') AS side
+                FROM audit_events
+                WHERE ledger_type = 'trade' AND event_type = 'trade_filled'
+                  AND account_id = ? AND sleeve_id = ? AND symbol = ? AND timestamp <= ?
+                """,
+                (account_id, sleeve_id, symbol, as_of_ts),
+            ).fetchall()
+        qty = 0
+        for row in rows:
+            q = int(row["quantity"] or 0)
+            qty += q if str(row["side"]).upper() == "BUY" else -q
+        return qty
+
     def list_events(self, filters: dict[str, str | None] | None = None) -> list[dict[str, Any]]:
         filters = filters or {}
         clauses: list[str] = []

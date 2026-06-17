@@ -8,14 +8,23 @@ import unittest
 class AppSettingsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
+        # 保存外部(如 shell/CI)预设的环境,tearDown 还原,避免污染后续测试的默认数据源。
+        self._saved_home = os.environ.get("PAPER_TRADING_HOME")
+        self._saved_ds = os.environ.get("PT_DEFAULT_DATA_SOURCE")
         os.environ["PAPER_TRADING_HOME"] = self.tmp.name
         os.environ.pop("PT_DEFAULT_DATA_SOURCE", None)
         from backend import app_settings
         self.app_settings = app_settings
 
     def tearDown(self) -> None:
-        os.environ.pop("PAPER_TRADING_HOME", None)
-        os.environ.pop("PT_DEFAULT_DATA_SOURCE", None)
+        for key, saved in (
+            ("PAPER_TRADING_HOME", self._saved_home),
+            ("PT_DEFAULT_DATA_SOURCE", self._saved_ds),
+        ):
+            if saved is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = saved
         self.tmp.cleanup()
 
     def test_code_default_is_tongdaxin(self) -> None:

@@ -516,6 +516,88 @@ class TradingStoreTest(unittest.TestCase):
                 }
             )
 
+    def test_place_order_rejects_sell_before_buy_chronology(self) -> None:
+        # 复现"凭空造现金"漏洞:先按 6/16 买入,再补一笔时间更早(6/15)的卖出。
+        # 卖出应按"当时(6/15)持仓"校验——那时还没买,持仓为 0,必须拒单。
+        buy = self.trading.place_order(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "strategy_id": "strategy_test",
+                "run_id": "manual_open_buy",
+                "symbol": "300066.SZ",
+                "side": "BUY",
+                "quantity": 200,
+                "signal_price": 6.03,
+                "fill_price": 6.03,
+                "timestamp": "2026-06-16T09:30:00",
+                "source_event_id": "sig_backdate_buy",
+            }
+        )
+        self.assertTrue(buy["accepted"])
+
+        sell = self.trading.place_order(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "strategy_id": "strategy_test",
+                "run_id": "open_liquidation_monitor",
+                "symbol": "300066.SZ",
+                "side": "SELL",
+                "quantity": 200,
+                "signal_price": 16.38,
+                "fill_price": 16.38,
+                "timestamp": "2026-06-15T09:30:00",
+                "source_event_id": "sig_backdate_sell",
+            }
+        )
+        self.assertFalse(sell["accepted"])
+        self.assertIn("时序", sell["reason"])
+        # 持仓仍为买入的 200 股,不应被这笔非法卖出改写。
+        self.assertEqual(self.trading.list_positions("sleeve_test")[0]["quantity"], 200)
+
+    def test_backfill_rejects_sell_before_buy_chronology(self) -> None:
+        self.trading.backfill_trade(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "symbol": "300066.SZ",
+                "side": "BUY",
+                "quantity": 200,
+                "price": 6.03,
+                "trade_date": "2026-06-16",
+            }
+        )
+        with self.assertRaises(ValueError):
+            self.trading.backfill_trade(
+                {
+                    "account_id": "acct_test",
+                    "sleeve_id": "sleeve_test",
+                    "symbol": "300066.SZ",
+                    "side": "SELL",
+                    "quantity": 200,
+                    "price": 16.38,
+                    "trade_date": "2026-06-15",
+                }
+            )
+
+    def test_backfill_price_sanity_rejects_absurd_price(self) -> None:
+        # 接上 fixture 行情后,补录价偏离当日行情过大(此处约 10 元 vs 录入 9999)应被拦下。
+        self.trading.connectors = DataConnectorRegistry()
+        with self.assertRaises(ValueError):
+            self.trading.backfill_trade(
+                {
+                    "account_id": "acct_test",
+                    "sleeve_id": "sleeve_test",
+                    "symbol": "000001.SZ",
+                    "side": "BUY",
+                    "quantity": 100,
+                    "price": 9999,
+                    "trade_date": "2026-06-10",
+                    "data_source": "fixture",
+                }
+            )
+
     def test_backfill_skips_risk_and_timing_gates(self) -> None:
         # 即便不带任何择时/风控字段,补录也应直接成交(它绕过门控)。
         result = self.trading.backfill_trade(

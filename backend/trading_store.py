@@ -928,7 +928,16 @@ class TradingStore:
                 reason="insufficient sleeve cash",
             )
             return {"accepted": False, "reason": "insufficient sleeve cash", "event_id": order_event_id, "source_event_id": source_event_id}
-        if side == "SELL" and fill_quantity > position_before:
+        # 校验A(时序):显式(可能回溯)时间的卖单,按"该时点持仓"校验,防"未持有先卖"凭空造现金。
+        sell_limit = position_before
+        if payload.get("timestamp"):
+            sell_limit = self.audit_store.net_position_asof(account_id, sleeve_id, symbol, timestamp)
+        if side == "SELL" and fill_quantity > sell_limit:
+            reject_reason = (
+                "insufficient position quantity"
+                if sell_limit == position_before
+                else f"卖出 {fill_quantity} 股,但 {str(timestamp)[:10]} 当时按时序只持有 {sell_limit} 股(不能卖出当时未持有的量)"
+            )
             order_event_id = self._reject_order(
                 order_id=order_id,
                 account_id=account_id,
@@ -941,11 +950,11 @@ class TradingStore:
                 price=signal_price,
                 timestamp=timestamp,
                 source_event_id=source_event_id,
-                reason="insufficient position quantity",
+                reason=reject_reason,
             )
             return {
                 "accepted": False,
-                "reason": "insufficient position quantity",
+                "reason": reject_reason,
                 "event_id": order_event_id,
                 "source_event_id": source_event_id,
             }
@@ -1142,12 +1151,18 @@ class TradingStore:
         avg_cost_before = float(position["avg_cost"]) if position else 0.0
         available_cash = float(sleeve["available_cash"])
 
-        # 一致性:卖出不能超过当前持仓(否则会造出负持仓)。提示用户先按时间顺序补买入。
-        if side == "SELL" and quantity > position_before:
-            raise ValueError(
-                f"补录卖出 {quantity} 股,但该 sleeve 当前仅持有 {symbol} {position_before} 股;"
-                f"请先按时间顺序补录对应的买入。"
-            )
+        # 校验A(时序):卖出按"该交易日当时持仓"(成交事件按时序重建)校验,而非当前实时持仓。
+        # 否则"6/15 卖出 6/16 才买入的票"会蒙混过关,凭空造出现金/负持仓。
+        if side == "SELL":
+            held_asof = self.audit_store.net_position_asof(account_id, sleeve_id, symbol, timestamp)
+            if quantity > held_asof:
+                raise ValueError(
+                    f"补录卖出 {quantity} 股,但按交易日时序,{trade_date} 当时该 sleeve 只持有 {symbol} {held_asof} 股;"
+                    f"不能卖出当时还没买入的部分(请先按时间顺序补录买入)。"
+                )
+
+        # 校验B(价格哨兵):成交价偏离当日行情过大(超出 0.4x~2.5x)疑似错价,拦下。取不到行情则放行。
+        self._guard_price_sanity(symbol, price, trade_date, payload.get("data_source"))
 
         gross_amount = round(quantity * price, 2)
         commission = stamp_duty = 0.0
@@ -1736,6 +1751,33 @@ class TradingStore:
         if not updated:
             raise ValueError(f"unknown order_id: {order_id}")
         return updated
+
+    def _guard_price_sanity(self, symbol: str, price: float, trade_date: str, data_source: Any) -> None:
+        """成交价与当日行情偏离过大(超出 0.4x~2.5x)时拦截,疑似错价。
+
+        A 股单日涨跌幅受限,正常成交价不可能偏离当日收盘 2.5 倍;偏离这么多基本是录错价
+        (如把 6 元的票按 16 元卖)。取不到当日行情就放行,避免误伤离线/历史深度不足的场景。
+        """
+        if not self.connectors or price <= 0:
+            return
+        try:
+            connector = self.connectors.get(data_source)
+            bars = connector.get_bars([symbol], frequency="1d", limit=3, start=trade_date, end=trade_date)
+            closes = [
+                float(bar["close"])
+                for bar in bars
+                if str(bar.get("symbol", "")).upper() == symbol and float(bar.get("close") or 0) > 0
+            ]
+        except Exception:  # noqa: BLE001 - 取不到行情不拦截
+            return
+        if not closes:
+            return
+        market = closes[-1]
+        if market > 0 and (price > market * 2.5 or price < market * 0.4):
+            raise ValueError(
+                f"成交价 {price} 与 {trade_date} 行情 {market:.2f} 偏离过大(应在 {market * 0.4:.2f}~{market * 2.5:.2f} 之间);"
+                f"疑似录错价格,请核对后再补录。"
+            )
 
     def _latest_close(self, data_source: str, symbol: str, frequency: str) -> float:
         if not self.connectors:
