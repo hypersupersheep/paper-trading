@@ -29,6 +29,7 @@ const state = {
     hoverIndex: null,
   },
   selectedId: null,
+  pnlSort: "time",
   view: "overview",
 };
 
@@ -141,7 +142,13 @@ function renderPnlBoard() {
     body.innerHTML = `<tr><td colspan="7" class="muted">暂无已实现盈亏 · 完成一轮买卖后显示</td></tr>`;
     return;
   }
-  body.innerHTML = board.symbols
+  // 默认按时间(最近在上),可切换按盈亏(高到低)。
+  const rows = [...board.symbols].sort((a, b) =>
+    state.pnlSort === "pnl"
+      ? (b.realized_pnl || 0) - (a.realized_pnl || 0)
+      : String(b.last_timestamp || "").localeCompare(String(a.last_timestamp || ""))
+  );
+  body.innerHTML = rows
     .map(
       (s) => `
       <tr>
@@ -2456,6 +2463,13 @@ function escapeHtml(value) {
 $("applyFilters").addEventListener("click", () => {
   state.selectedId = null;
   Promise.all([loadPortfolio(), loadOrders(), loadEvents(), loadAuditTrades()]).catch((error) => showToast(error.message));
+});
+$("pnlSort").addEventListener("click", (event) => {
+  const btn = event.target.closest("button[data-sort]");
+  if (!btn) return;
+  state.pnlSort = btn.dataset.sort;
+  for (const b of $("pnlSort").querySelectorAll("button")) b.classList.toggle("active", b === btn);
+  renderPnlBoard();
 });
 $("resetFilters").addEventListener("click", resetFilters);
 $("exportCsv").addEventListener("click", () => download("csv"));

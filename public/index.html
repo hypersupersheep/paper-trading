@@ -710,7 +710,13 @@ def on_bar(ctx, bar):
             <h2>个股盈亏看台</h2>
             <span>历史买卖的已实现盈亏(平均成本法,卖出时结转)</span>
           </div>
-          <strong id="pnlTotal" class="pnl-total">--</strong>
+          <div class="pnl-head-right">
+            <div class="seg" id="pnlSort">
+              <button type="button" data-sort="time" class="active">按时间</button>
+              <button type="button" data-sort="pnl">按盈亏</button>
+            </div>
+            <strong id="pnlTotal" class="pnl-total">--</strong>
+          </div>
         </div>
         <div class="table-wrap">
           <table class="pnl-table">

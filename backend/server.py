@@ -188,10 +188,14 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/api/audit/trades":
-                self._json({"trades": self.store.trade_summaries(query)})
+                trades = self.store.trade_summaries(query)
+                self._fill_trade_names(query.get("data_source"), trades)
+                self._json({"trades": trades})
                 return
             if path == "/api/audit/pnl":
-                self._json(self.store.realized_pnl_by_symbol(query))
+                board = self.store.realized_pnl_by_symbol(query)
+                self._fill_trade_names(query.get("data_source"), board["symbols"])
+                self._json(board)
                 return
             if path.startswith("/api/audit/"):
                 ledger_key = path.removeprefix("/api/audit/").strip("/")
@@ -354,6 +358,20 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 security_names.update(fetched)
         except Exception:
             pass
+
+    def _fill_trade_names(self, data_source: Any, rows: list[dict[str, Any]]) -> None:
+        """日志页自愈:对仍只有代码(name==symbol)的标的,用数据源批量取名并缓存,再回填本次结果。"""
+        unknown = sorted({r["symbol"] for r in rows if r.get("symbol") and r.get("name") == r["symbol"]})
+        if not unknown:
+            return
+        try:
+            connector = self.strategies.connectors.get(data_source)
+            self._refresh_names(connector, unknown)
+        except Exception:  # noqa: BLE001 - 取名失败不影响主流程,继续显示代码
+            pass
+        for row in rows:
+            if row.get("symbol") and row.get("name") == row["symbol"]:
+                row["name"] = security_names.resolve(row["symbol"])
 
     def _portfolio_summary(self, query: dict[str, str | None]) -> dict:
         account_id = query.get("account_id")

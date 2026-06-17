@@ -2225,3 +2225,34 @@ td.muted,
 .trades-table tbody td {
   padding: 11px 12px;
 }
+
+/* 个股盈亏看台:右侧排序切换 + 合计 */
+.pnl-head-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.seg {
+  display: inline-flex;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 2px;
+}
+.seg button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 100px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.seg button:hover {
+  color: var(--text);
+}
+.seg button.active {
+  background: var(--accent);
+  color: #fff;
+}
