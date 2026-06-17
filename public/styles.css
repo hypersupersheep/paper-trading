@@ -2131,3 +2131,97 @@ tbody tr.selected {
   color: var(--accent-strong);
   font-weight: 600;
 }
+
+/* ------------------- 日志页:折叠交易流水 + 个股盈亏看台 ------------------- */
+/* 通用小工具类 */
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.strong {
+  font-weight: 600;
+}
+td.muted,
+.muted {
+  color: var(--muted);
+}
+
+/* 标的:名称为主、代码为辅 */
+.sym-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.sym-code {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.mini-tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 100px;
+  font-size: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+/* 状态徽章(成交/拒绝/拦截/撤单),用交通灯但不与红涨绿跌混淆 */
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.status-dot::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--flat);
+}
+.status-dot.ok {
+  color: var(--text);
+}
+.status-dot.ok::before {
+  background: var(--ok);
+}
+.status-dot.bad {
+  color: var(--danger);
+}
+.status-dot.bad::before {
+  background: var(--danger);
+}
+.status-dot.warn {
+  color: var(--warn);
+}
+.status-dot.warn::before {
+  background: var(--warn);
+}
+
+/* 个股盈亏看台 */
+.pnl-board {
+  margin-bottom: 12px;
+}
+.pnl-board .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.pnl-total {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.pnl-board .table-wrap {
+  max-height: 260px;
+}
+.pnl-table tbody td {
+  white-space: nowrap;
+}
+
+/* 交易流水表:行高更舒展,数字等宽 */
+.trades-table tbody td {
+  padding: 11px 12px;
+}

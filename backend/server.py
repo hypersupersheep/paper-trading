@@ -187,6 +187,12 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                     {"Content-Disposition": f'attachment; filename="{filename}"'},
                 )
                 return
+            if path == "/api/audit/trades":
+                self._json({"trades": self.store.trade_summaries(query)})
+                return
+            if path == "/api/audit/pnl":
+                self._json(self.store.realized_pnl_by_symbol(query))
+                return
             if path.startswith("/api/audit/"):
                 ledger_key = path.removeprefix("/api/audit/").strip("/")
                 if ledger_key not in LEDGER_TYPES:

@@ -686,6 +686,57 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(result["annual_rate"], 0.02)
         self.assertEqual(result["rate_source"], "custom")
 
+    def test_trade_summaries_collapse_chain_and_realized_pnl(self) -> None:
+        # 一买一卖 → 折叠成两行(各带名称),卖出行结转已实现盈亏;个股看台汇总。
+        self.trading.place_order(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "strategy_id": "strategy_test",
+                "run_id": "run_buy",
+                "symbol": "600519.SH",
+                "side": "BUY",
+                "quantity": 100,
+                "signal_price": 100,
+                "fill_price": 100,
+                "source_event_id": "sig_sum_buy",
+            }
+        )
+        self.trading.place_order(
+            {
+                "account_id": "acct_test",
+                "sleeve_id": "sleeve_test",
+                "strategy_id": "strategy_test",
+                "run_id": "run_sell",
+                "symbol": "600519.SH",
+                "side": "SELL",
+                "quantity": 100,
+                "signal_price": 120,
+                "fill_price": 120,
+                "source_event_id": "sig_sum_sell",
+            }
+        )
+
+        summaries = self.audit.trade_summaries({"account_id": "acct_test"})
+        trades = [s for s in summaries if s["kind"] == "trade" and s["symbol"] == "600519.SH"]
+        self.assertEqual(len(trades), 2)
+        for s in trades:
+            self.assertEqual(s["name"], "贵州茅台")  # 代码之外标注名称
+        buy = next(s for s in trades if s["side"] == "BUY")
+        sell = next(s for s in trades if s["side"] == "SELL")
+        self.assertIsNone(buy["realized_pnl"])  # 买入不结转盈亏
+        self.assertIsNotNone(sell["realized_pnl"])
+        self.assertGreater(sell["realized_pnl"], 0)  # 100→120 获利(扣费后仍为正)
+        self.assertLess(sell["realized_pnl"], 2000)  # 已扣手续费/印花/滑点
+
+        board = self.audit.realized_pnl_by_symbol({"account_id": "acct_test"})
+        row = next(r for r in board["symbols"] if r["symbol"] == "600519.SH")
+        self.assertEqual(row["name"], "贵州茅台")
+        self.assertEqual(row["buy_quantity"], 100)
+        self.assertEqual(row["sell_quantity"], 100)
+        self.assertEqual(row["realized_pnl"], sell["realized_pnl"])
+        self.assertEqual(board["total_realized_pnl"], sell["realized_pnl"])
+
     def test_sync_auto_repo_skips_today_and_self_heals_premature_record(self) -> None:
         from backend.trading_store import _today_cn
 

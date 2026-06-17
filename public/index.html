@@ -704,24 +704,51 @@ def on_bar(ctx, bar):
         <button id="resetFilters">重置</button>
       </section>
 
+      <section class="panel pnl-board" data-view="replay">
+        <div class="panel-head">
+          <div>
+            <h2>个股盈亏看台</h2>
+            <span>历史买卖的已实现盈亏(平均成本法,卖出时结转)</span>
+          </div>
+          <strong id="pnlTotal" class="pnl-total">--</strong>
+        </div>
+        <div class="table-wrap">
+          <table class="pnl-table">
+            <thead>
+              <tr>
+                <th>标的</th>
+                <th>已实现盈亏</th>
+                <th>买入量</th>
+                <th>卖出量</th>
+                <th>费用</th>
+                <th>笔数</th>
+                <th>最近</th>
+              </tr>
+            </thead>
+            <tbody id="pnlTable"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="workspace" data-view="replay">
         <div class="panel event-list">
           <div class="panel-head">
-            <h2>结构化审计流水</h2>
-            <span>点击任意行查看完整审计链路</span>
+            <h2>交易流水</h2>
+            <span>一笔交易折叠为一行 · 点击查看完整审计链路</span>
           </div>
           <div class="table-wrap">
-            <table>
+            <table class="trades-table">
               <thead>
                 <tr>
                   <th>时间</th>
-                  <th>Ledger</th>
-                  <th>事件</th>
-                  <th>代码</th>
-                  <th>金额</th>
+                  <th>标的</th>
+                  <th>方向</th>
                   <th>数量</th>
-                  <th>价格</th>
-                  <th>原因</th>
+                  <th>成交价</th>
+                  <th>成交额</th>
+                  <th>费用</th>
+                  <th>已实现盈亏</th>
+                  <th>状态</th>
                 </tr>
               </thead>
               <tbody id="eventsTable"></tbody>
@@ -731,8 +758,8 @@ def on_bar(ctx, bar):
 
         <aside class="panel chain-panel">
           <div class="panel-head">
-            <h2>Audit Chain</h2>
-            <span id="chainSubtitle">选择一条事件</span>
+            <h2>审计链路</h2>
+            <span id="chainSubtitle">选择一笔交易</span>
           </div>
           <div id="chainContent" class="chain-empty">信号 → 择时 → 风控 → 订单 → 成交 → 现金 → 持仓 → 净值</div>
         </aside>

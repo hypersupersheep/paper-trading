@@ -1,5 +1,7 @@
 const state = {
   events: [],
+  trades: [],
+  pnl: null,
   orders: [],
   portfolio: null,
   accounts: [],
@@ -104,14 +106,55 @@ async function fetchJson(url) {
 }
 
 async function loadEvents() {
+  // 概览页的审计计数仍用原始事件;日志页的折叠流水走 loadAuditTrades。
   const params = queryParams();
   const data = await fetchJson(`/api/audit/events?${params}`);
   state.events = data.events;
   renderMetrics();
+}
+
+async function loadAuditTrades() {
+  const params = queryParams();
+  const [trades, pnl] = await Promise.all([
+    fetchJson(`/api/audit/trades?${params}`),
+    fetchJson(`/api/audit/pnl?${params}`),
+  ]);
+  state.trades = trades.trades || [];
+  state.pnl = pnl;
+  renderPnlBoard();
   renderTable();
-  if (state.events.length && !state.selectedId) {
-    selectEvent(state.events[0].id);
+  if (state.trades.length && !state.trades.some((t) => t.id === state.selectedId)) {
+    selectEvent(state.trades[0].id);
   }
+}
+
+function renderPnlBoard() {
+  const body = $("pnlTable");
+  if (!body) return;
+  const board = state.pnl || { symbols: [], total_realized_pnl: 0 };
+  const totalEl = $("pnlTotal");
+  if (totalEl) {
+    totalEl.textContent = `合计 ${formatSigned(board.total_realized_pnl)}`;
+    totalEl.className = `pnl-total ${numberClass(board.total_realized_pnl)}`;
+  }
+  if (!board.symbols.length) {
+    body.innerHTML = `<tr><td colspan="7" class="muted">暂无已实现盈亏 · 完成一轮买卖后显示</td></tr>`;
+    return;
+  }
+  body.innerHTML = board.symbols
+    .map(
+      (s) => `
+      <tr>
+        <td><span class="sym-name">${escapeHtml(s.name || s.symbol)}</span>${s.name && s.name !== s.symbol ? `<span class="sym-code">${escapeHtml(s.symbol)}</span>` : ""}</td>
+        <td class="${numberClass(s.realized_pnl)} num strong">${formatSigned(s.realized_pnl)}</td>
+        <td class="num">${formatNumber(s.buy_quantity)}</td>
+        <td class="num">${formatNumber(s.sell_quantity)}</td>
+        <td class="num muted">${formatNumber(s.fees)}</td>
+        <td class="num muted">${s.trades}</td>
+        <td class="muted">${s.last_timestamp ? formatTime(s.last_timestamp) : "--"}</td>
+      </tr>`
+    )
+    .join("");
 }
 
 async function loadOrders() {
@@ -1653,22 +1696,44 @@ function renderMetrics() {
   $("metricRiskBlocks").textContent = state.events.filter((event) => event.event_type === "risk_blocked").length;
 }
 
+const TRADE_STATUS = {
+  trade: ["成交", "ok"],
+  order_rejected: ["拒绝", "bad"],
+  risk_blocked: ["风控拦截", "bad"],
+  timing_blocked: ["择时拦截", "warn"],
+  order_cancelled: ["撤单", "warn"],
+};
+
 function renderTable() {
   const body = $("eventsTable");
+  if (!body) return;
   body.innerHTML = "";
-  for (const event of state.events) {
+  if (!state.trades.length) {
+    body.innerHTML = `<tr><td colspan="9" class="muted">暂无交易流水</td></tr>`;
+    return;
+  }
+  for (const t of state.trades) {
     const row = document.createElement("tr");
-    row.className = event.id === state.selectedId ? "selected" : "";
-    row.addEventListener("click", () => selectEvent(event.id));
+    row.className = t.id === state.selectedId ? "selected" : "";
+    row.addEventListener("click", () => selectEvent(t.id));
+    const [statusLabel, statusKind] = TRADE_STATUS[t.kind] || [t.kind, ""];
+    const isTrade = t.kind === "trade";
+    const sideLabel = t.side === "BUY" ? "买入" : t.side === "SELL" ? "卖出" : "--";
+    const sideClass = t.side === "BUY" ? "positive" : t.side === "SELL" ? "negative" : "";
+    const symName = escapeHtml(t.name || t.symbol || "--");
+    // 名称未知(后端回退成代码)时不重复显示代码。
+    const symCode = t.symbol && t.name && t.name !== t.symbol ? `<span class="sym-code">${escapeHtml(t.symbol)}</span>` : "";
+    const backfillTag = t.backfill ? `<span class="mini-tag">补录</span>` : "";
     row.innerHTML = `
-      <td>${formatTime(event.timestamp)}</td>
-      <td><span class="tag ${event.ledger_type}">${event.ledger_type}</span></td>
-      <td>${event.event_type}</td>
-      <td>${event.symbol || "--"}</td>
-      <td class="${numberClass(event.amount)}">${formatNumber(event.amount)}</td>
-      <td>${formatNumber(event.quantity)}</td>
-      <td>${formatNumber(event.price)}</td>
-      <td>${event.reason || "--"}</td>
+      <td class="muted">${formatTime(t.timestamp)}</td>
+      <td><span class="sym-name">${symName}</span>${symCode}${backfillTag}</td>
+      <td class="${sideClass} strong">${sideLabel}</td>
+      <td class="num">${isTrade ? formatNumber(t.quantity) : "--"}</td>
+      <td class="num">${isTrade ? formatNumber(t.price) : "--"}</td>
+      <td class="num">${isTrade ? formatNumber(t.gross_amount) : "--"}</td>
+      <td class="num muted">${isTrade ? formatNumber(t.fees) : "--"}</td>
+      <td class="num ${numberClass(t.realized_pnl)} strong">${t.realized_pnl !== null && t.realized_pnl !== undefined ? formatSigned(t.realized_pnl) : "--"}</td>
+      <td><span class="status-dot ${statusKind}" title="${escapeHtml(t.reason || "")}">${statusLabel}</span></td>
     `;
     body.appendChild(row);
   }
@@ -1678,7 +1743,10 @@ async function selectEvent(eventId) {
   state.selectedId = eventId;
   renderTable();
   const chain = await fetchJson(`/api/audit/chain/${encodeURIComponent(eventId)}`);
-  $("chainSubtitle").textContent = eventId;
+  const t = state.trades.find((x) => x.id === eventId);
+  $("chainSubtitle").textContent = t
+    ? `${t.name || t.symbol || ""} ${t.symbol || ""} · ${formatTime(t.timestamp)}`.trim()
+    : eventId;
   renderChain(chain);
 }
 
@@ -1748,6 +1816,7 @@ async function refreshAll(selectEventId = null) {
   await loadPortfolio();
   await loadOrders();
   await loadEvents();
+  await loadAuditTrades().catch(() => {});
   await loadWatchlist().catch(() => {});
   await loadRepoInstruments().catch(() => {});
   await loadReverseRepo().catch(() => {});
@@ -2333,7 +2402,7 @@ function resetFilters() {
   $("symbolFilter").value = "";
   $("eventTypeFilter").value = "";
   state.selectedId = null;
-  Promise.all([loadPortfolio(), loadOrders(), loadEvents()]).catch((error) => showToast(error.message));
+  Promise.all([loadPortfolio(), loadOrders(), loadEvents(), loadAuditTrades()]).catch((error) => showToast(error.message));
 }
 
 function findStrategyName(strategyId) {
@@ -2346,7 +2415,12 @@ function findTimingName(timingStrategyId) {
 
 function formatTime(value) {
   if (!value) return "--";
-  return value.replace("T", " ").replace("+08:00", "").replace("+00:00", "");
+  return value
+    .replace("T", " ")
+    .replace(/\.\d+/, "") // 去掉微秒小数,保持简洁
+    .replace("+08:00", "")
+    .replace("+00:00", "")
+    .trim();
 }
 
 function formatNumber(value) {
@@ -2357,6 +2431,13 @@ function formatNumber(value) {
 function formatPercent(value) {
   if (value === null || value === undefined || value === "") return "--";
   return `${(Number(value) * 100).toFixed(2)}%`;
+}
+
+function formatSigned(value) {
+  if (value === null || value === undefined || value === "") return "--";
+  const n = Number(value);
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 }
 
 function numberClass(value) {
@@ -2374,7 +2455,7 @@ function escapeHtml(value) {
 
 $("applyFilters").addEventListener("click", () => {
   state.selectedId = null;
-  Promise.all([loadPortfolio(), loadOrders(), loadEvents()]).catch((error) => showToast(error.message));
+  Promise.all([loadPortfolio(), loadOrders(), loadEvents(), loadAuditTrades()]).catch((error) => showToast(error.message));
 });
 $("resetFilters").addEventListener("click", resetFilters);
 $("exportCsv").addEventListener("click", () => download("csv"));
@@ -2491,7 +2572,13 @@ function setActiveAccount(id) {
   $("topAccountSelect").value = id;
   if (state.accounts.some((a) => a.id === id)) $("repoAccount").value = id;
   state.selectedId = null;
-  return Promise.all([loadPortfolio(), loadOrders(), loadEvents(), loadReverseRepo()]).then(updateRepoAmountDefault);
+  return Promise.all([
+    loadPortfolio(),
+    loadOrders(),
+    loadEvents(),
+    loadAuditTrades(),
+    loadReverseRepo(),
+  ]).then(updateRepoAmountDefault);
 }
 
 $("topAccountSelect").addEventListener("change", (event) =>

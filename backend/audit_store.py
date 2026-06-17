@@ -476,6 +476,148 @@ class AuditStore:
             "all_events": events,
         }
 
+    def trade_summaries(self, filters: dict[str, str | None] | None = None) -> list[dict[str, Any]]:
+        """把"一笔交易/一只股票"引起的整条审计流水折叠成一行,并补上股票名称。
+
+        每个 trade_filled 折叠它同一条链(source_event_id)上的本金/佣金/印花税/滑点/持仓子事件,
+        汇总成:方向、数量、成交价、成交额、费用合计、净现金影响、成交后持仓、卖出已实现盈亏。
+        没有成交的链(被风控/择时拦截、订单拒绝/撤销)各保留一行头条,信息不丢。
+        """
+        from backend import names
+
+        filters = dict(filters or {})
+        action_limit = int(filters.get("limit") or 300)
+        # 放宽底层拉取量,确保同一笔的子事件能凑齐再折叠。
+        raw = self.list_events({**filters, "event_type": None, "limit": max(action_limit * 12, 4000)})
+
+        by_root: dict[str, list[dict[str, Any]]] = {}
+        for event in raw:
+            by_root.setdefault(event.get("source_event_id") or event["id"], []).append(event)
+
+        fee_types = {"commission", "stamp_duty", "slippage"}
+        rows: list[dict[str, Any]] = []
+        for root, group in by_root.items():
+            group.sort(key=lambda e: (e["timestamp"], e["id"]))
+            trade = next(
+                (e for e in group if e["ledger_type"] == "trade" and e["event_type"] == "trade_filled"),
+                None,
+            )
+            if trade is not None:
+                side = str((trade.get("metadata") or {}).get("side") or "").upper()
+                qty = int(trade.get("quantity") or 0)
+                price = float(trade.get("price") or 0.0)
+                gross = float(trade.get("amount") or 0.0)
+                fees = round(sum(-float(e.get("amount") or 0.0) for e in group if e["event_type"] in fee_types), 2)
+                position = next((e for e in group if e["ledger_type"] == "position"), None)
+                avg_before = float(((position or {}).get("before_state") or {}).get("avg_cost") or 0.0)
+                pos_after = int((trade.get("after_state") or {}).get("position") or 0)
+                net_cash = round((-gross if side == "BUY" else gross) - fees, 2)
+                realized = None
+                if side == "SELL" and avg_before > 0:
+                    realized = round(qty * (price - avg_before) - fees, 2)
+                backfill = bool(
+                    (trade.get("metadata") or {}).get("backfill")
+                    or any(e["event_type"] == "trade_backfill_declared" for e in group)
+                )
+                rows.append(
+                    {
+                        "kind": "trade",
+                        "id": trade["id"],
+                        "root_id": root,
+                        "timestamp": trade["timestamp"],
+                        "account_id": trade.get("account_id"),
+                        "sleeve_id": trade.get("sleeve_id"),
+                        "strategy_id": trade.get("strategy_id"),
+                        "symbol": trade.get("symbol"),
+                        "name": names.resolve(trade.get("symbol") or ""),
+                        "side": side,
+                        "quantity": qty,
+                        "price": price,
+                        "gross_amount": gross,
+                        "fees": fees,
+                        "net_cash": net_cash,
+                        "position_after": pos_after,
+                        "avg_cost_before": round(avg_before, 4) if avg_before else None,
+                        "realized_pnl": realized,
+                        "backfill": backfill,
+                        "reason": trade.get("reason"),
+                    }
+                )
+                continue
+
+            headline = next(
+                (
+                    e
+                    for e in group
+                    if e["event_type"] in ("order_rejected", "risk_blocked", "timing_blocked", "order_cancelled")
+                ),
+                None,
+            )
+            if headline is not None:
+                symbol = headline.get("symbol")
+                rows.append(
+                    {
+                        "kind": headline["event_type"],
+                        "id": headline["id"],
+                        "root_id": root,
+                        "timestamp": headline["timestamp"],
+                        "account_id": headline.get("account_id"),
+                        "sleeve_id": headline.get("sleeve_id"),
+                        "strategy_id": headline.get("strategy_id"),
+                        "symbol": symbol,
+                        "name": names.resolve(symbol) if symbol else "",
+                        "side": str((headline.get("metadata") or {}).get("side") or "").upper(),
+                        "quantity": int(headline.get("quantity") or 0) or None,
+                        "price": headline.get("price"),
+                        "gross_amount": None,
+                        "fees": None,
+                        "net_cash": None,
+                        "realized_pnl": None,
+                        "backfill": False,
+                        "reason": headline.get("reason"),
+                    }
+                )
+
+        rows.sort(key=lambda r: r["timestamp"], reverse=True)
+        return rows[:action_limit]
+
+    def realized_pnl_by_symbol(self, filters: dict[str, str | None] | None = None) -> dict[str, Any]:
+        """按个股汇总历史买卖的已实现盈亏(平均成本法,卖出时结转)。供日志页的个股盈亏看台。"""
+        rows = self.trade_summaries({**(filters or {}), "limit": 100000})
+        agg: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            if r["kind"] != "trade" or not r.get("symbol"):
+                continue
+            sym = r["symbol"]
+            bucket = agg.setdefault(
+                sym,
+                {
+                    "symbol": sym,
+                    "name": r["name"],
+                    "realized_pnl": 0.0,
+                    "buy_quantity": 0,
+                    "sell_quantity": 0,
+                    "fees": 0.0,
+                    "trades": 0,
+                    "last_timestamp": None,
+                },
+            )
+            bucket["trades"] += 1
+            bucket["fees"] = round(bucket["fees"] + float(r.get("fees") or 0.0), 2)
+            if r["side"] == "BUY":
+                bucket["buy_quantity"] += int(r.get("quantity") or 0)
+            else:
+                bucket["sell_quantity"] += int(r.get("quantity") or 0)
+            if r.get("realized_pnl") is not None:
+                bucket["realized_pnl"] = round(bucket["realized_pnl"] + float(r["realized_pnl"]), 2)
+            if not bucket["last_timestamp"] or r["timestamp"] > bucket["last_timestamp"]:
+                bucket["last_timestamp"] = r["timestamp"]
+
+        out = list(agg.values())
+        out.sort(key=lambda b: b["realized_pnl"], reverse=True)
+        total = round(sum(b["realized_pnl"] for b in out), 2)
+        return {"symbols": out, "total_realized_pnl": total}
+
     def export_events(self, filters: dict[str, str | None], export_format: str) -> tuple[str, str]:
         events = self.list_events(filters)
         if export_format == "json":

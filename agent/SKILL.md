@@ -114,6 +114,8 @@ GET  /api/repo/rate?symbol=204001.SH            逆回购实时年化利率;GET 
 POST /api/accounts/{id}/reverse-repo/reconcile  幂等补全闲置现金的逐日逆回购(**只补今天以前**:逆回购14:30盘后才成交,当日闲置现金未定盘不自动计提;并自愈清掉当日被提前误补的 auto 记录)
 GET  /api/quotes?symbols=...           批量行情
 GET  /api/audit/chain/{event_id}       审计链路
+GET  /api/audit/trades                 交易流水(一笔交易/一只股票折叠成一行,带名称/方向/费用/卖出已实现盈亏;支持 account_id/symbol/strategy_id 过滤)
+GET  /api/audit/pnl                     个股已实现盈亏看台(按标的汇总历史买卖,平均成本法)
 GET  /api/data/connectors/health       数据源状态
 ```
 
