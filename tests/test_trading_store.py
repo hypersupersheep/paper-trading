@@ -686,6 +686,57 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(result["annual_rate"], 0.02)
         self.assertEqual(result["rate_source"], "custom")
 
+    def test_sync_auto_repo_skips_today_and_self_heals_premature_record(self) -> None:
+        from backend.trading_store import _today_cn
+
+        today = _today_cn()
+        cash0 = self.trading.get_account("acct_test")["unallocated_cash"]
+        # 模拟"当日被提前自动补"的脏记录(每账户每日仅一条):写 source=auto 当日记录,并按旧逻辑把利息记进未分配现金。
+        with self.trading._connection() as conn:
+            conn.execute(
+                "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
+                (24.66, "acct_test"),
+            )
+        self.trading._upsert_repo_record(
+            account_id="acct_test",
+            trade_date=today,
+            timestamp=f"{today}T14:30:00+08:00",
+            invest_amount=500_000,
+            annual_rate=0.018,
+            interest=24.66,
+            source="auto",
+        )
+
+        # reconcile:计划里即便混进当日也不补;并清掉当日的"自动"脏记录、把利息扣回。
+        res = self.trading.sync_auto_repo(
+            "acct_test",
+            [{"trade_date": today, "principal": 500_000, "interest": 24.66, "annual_rate": 0.018}],
+        )
+        self.assertEqual(res["filled"], 0)
+        self.assertEqual(res["removed_today"], 1)
+        self.assertEqual(res["reverted_interest"], 24.66)
+
+        # 现金回到注入脏记录前(自动那 24.66 被扣回);当日记录清空。
+        cash1 = self.trading.get_account("acct_test")["unallocated_cash"]
+        self.assertEqual(round(cash1 - cash0, 2), 0.0)
+        self.assertEqual(self.trading.list_reverse_repo("acct_test")["summary"]["days"], 0)
+
+        # 手动当日记录则应保留(只清 source=auto)。
+        self.trading._upsert_repo_record(
+            account_id="acct_test",
+            trade_date=today,
+            timestamp=f"{today}T14:30:00+08:00",
+            invest_amount=200_000,
+            annual_rate=0.018,
+            interest=9.86,
+            source="manual",
+        )
+        res2 = self.trading.sync_auto_repo("acct_test", [])
+        self.assertEqual(res2["removed_today"], 0)
+        today_rows = [r for r in self.trading.list_reverse_repo("acct_test")["records"] if r["trade_date"] == today]
+        self.assertEqual(len(today_rows), 1)
+        self.assertEqual(today_rows[0]["source"], "manual")
+
     def test_backfill_without_sleeve_uses_existing_default(self) -> None:
         # 账户已有一个 sleeve(setUp 建的),不指定 sleeve_id 应自动落到它,不新建。
         result = self.trading.backfill_trade(

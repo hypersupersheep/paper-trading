@@ -118,10 +118,12 @@ def reconstruct(
         trading_cash = round(trading_cash + cash_by_day.get(day, 0.0), 2)
 
         # 3) 闲置现金计提逆回购(到下个交易日的天数);利率优先用当日实时行情,缺则账户默认。
+        #    只计提"当天以前"的日子:逆回购 14:30 盘后才成交,当日盘中闲置现金尚未定盘,
+        #    自动计提会把用户还要拿去买股票的钱提前锁进逆回购。当日只允许手动买入。
         day_str = day.isoformat()
         market_rate = (repo_rates or {}).get(day_str)
         day_rate = market_rate if market_rate is not None else repo_annual_rate
-        if repo_enabled and trading_cash > 0 and day_rate > 0:
+        if repo_enabled and trading_cash > 0 and day_rate > 0 and day_str < today:
             gap = (days[i + 1] - day).days if i + 1 < len(days) else 1
             interest = round(trading_cash * day_rate * gap / 365, 2)
             cum_interest = round(cum_interest + interest, 2)

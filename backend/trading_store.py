@@ -1419,9 +1419,30 @@ class TradingStore:
         """
         if not self.get_account(account_id):
             raise ValueError(f"unknown account_id: {account_id}")
+        today = _today_cn()
         inserted = 0
         new_interest = 0.0
+        reverted_interest = 0.0
         with self._connection() as conn:
+            # 自愈:清掉"当日(及未来)"被提前自动补的逆回购——当日只能手动买,自动不该碰。
+            # 手动记录(source!='auto')一律保留。删除时把当初记入未分配现金的利息原路扣回。
+            stale = conn.execute(
+                "SELECT interest FROM reverse_repo_records "
+                "WHERE account_id = ? AND trade_date >= ? AND source = 'auto'",
+                (account_id, today),
+            ).fetchall()
+            if stale:
+                reverted_interest = round(sum(float(r["interest"]) for r in stale), 2)
+                conn.execute(
+                    "DELETE FROM reverse_repo_records "
+                    "WHERE account_id = ? AND trade_date >= ? AND source = 'auto'",
+                    (account_id, today),
+                )
+                if reverted_interest:
+                    conn.execute(
+                        "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash - ?, 2) WHERE id = ?",
+                        (reverted_interest, account_id),
+                    )
             existing = {
                 row["trade_date"]
                 for row in conn.execute(
@@ -1430,7 +1451,8 @@ class TradingStore:
             }
             for entry in schedule:
                 day = str(entry["trade_date"])
-                if day in existing:
+                # 双保险:即便上游计划里混进了当日,自动补全也只补当日之前。
+                if day >= today or day in existing:
                     continue
                 interest = round(float(entry.get("interest", 0.0)), 2)
                 conn.execute(
@@ -1459,7 +1481,13 @@ class TradingStore:
                     "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
                     (round(new_interest, 2), account_id),
                 )
-        return {"filled": inserted, "total": len(schedule), "credited_interest": round(new_interest, 2)}
+        return {
+            "filled": inserted,
+            "total": len(schedule),
+            "credited_interest": round(new_interest, 2),
+            "removed_today": len(stale),
+            "reverted_interest": reverted_interest,
+        }
 
     def list_reverse_repo(self, account_id: str, limit: int = 750) -> dict[str, Any]:
         """逆回购面板数据:逐日记录 + 汇总(累计投入次数、累计利息)。"""

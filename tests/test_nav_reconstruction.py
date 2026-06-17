@@ -41,7 +41,9 @@ class NavReconstructionTest(unittest.TestCase):
             today="2024-01-02",
         )
         schedule = out["repo_schedule"]
-        self.assertEqual(len(schedule), 2)
+        # 只计提"当日以前":today=2024-01-02 当天不计提(盘后才成交),仅 day1(01-01)进计划。
+        self.assertEqual(len(schedule), 1)
+        self.assertNotIn("2024-01-02", [s["trade_date"] for s in schedule])
         # day1 闲置现金 990000,到周二 gap=1 → 利息 990000*0.018/365 = 48.82
         self.assertEqual(schedule[0]["principal"], 990_000.0)
         self.assertEqual(schedule[0]["interest"], round(990_000 * 0.018 / 365, 2))
