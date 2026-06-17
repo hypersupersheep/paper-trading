@@ -123,7 +123,8 @@ Only for recording **real historical trades that the system never logged** — n
 
 - **Strictly required**: `symbol`, `price`, `side`, `quantity`, `trade_date` (`YYYY-MM-DD`, at least date-level). Missing any → rejected.
 - Optional: `trade_time` (`HH:MM`), `apply_fees` (default true → applies commission + stamp duty, no slippage), `note`.
-- Consistency: a SELL cannot exceed the current position (backfill the matching BUY first, in chronological order); a BUY needs sufficient sleeve cash.
+- Consistency (enforced): a SELL is validated against the position **held as of its own `trade_date`** (reconstructed from prior fills by timestamp), not the current live position — so backfill the matching BUY *first, with an earlier/equal date*, or the SELL is rejected. A BUY needs sufficient sleeve cash.
+- Price sanity (enforced): a fill `price` deviating >2.5x or <0.4x from that day's market close is rejected as a likely typo (skipped only if no market data is reachable). Same as-of-date chronology check also guards `place_order` whenever you pass an explicit `timestamp` (backdated orders) — you cannot sell what wasn't yet held at that time.
 - Do **not** use this to fabricate normal trades — only to fill gaps. For live paper trading use `place_order`; for what-if testing use backtest.
 
 ```bash
