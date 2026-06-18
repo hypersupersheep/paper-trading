@@ -107,6 +107,10 @@ def security_names_path() -> Path:
     return data_dir() / "security_names.json"
 
 
+def security_industries_path() -> Path:
+    return data_dir() / "security_industries.json"
+
+
 def strategies_dir() -> Path:
     return _ensure(home() / "strategies")
 

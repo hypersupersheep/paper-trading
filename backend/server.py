@@ -373,6 +373,23 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _refresh_industries(self, data_source: Any, symbols: list[str]) -> None:
+        """best-effort:用数据源给未分类的标的取申万行业并缓存。连接器未提供 get_industries 则跳过。"""
+        from backend import industries
+
+        pending = sorted({s for s in symbols if s and industries.resolve(s) == industries.UNCLASSIFIED})
+        if not pending:
+            return
+        try:
+            connector = self.strategies.connectors.get(data_source)
+            if not hasattr(connector, "get_industries"):
+                return
+            fetched = connector.get_industries(pending)
+            if fetched:
+                industries.update(fetched)
+        except Exception:  # noqa: BLE001 - 取行业失败不影响主流程
+            pass
+
     def _fill_trade_names(self, data_source: Any, rows: list[dict[str, Any]]) -> None:
         """日志页自愈:对仍只有代码(name==symbol)的标的,用数据源批量取名并缓存,再回填本次结果。"""
         unknown = sorted({r["symbol"] for r in rows if r.get("symbol") and r.get("name") == r["symbol"]})
@@ -668,6 +685,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
 
         股票贡献之和 + 残差(现金/逆回购/费用)= 账户总盈亏,构成可对账的瀑布。
         """
+        from backend import industries
+
         realized = self.store.realized_pnl_by_symbol({"account_id": account_id})
         rows: dict[str, dict] = {}
         for sym in realized["symbols"]:
@@ -677,26 +696,47 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "realized_pnl": sym["realized_pnl"],
                 "unrealized_pnl": 0.0,
                 "fees": sym["fees"],
+                "market_value": 0.0,
             }
         live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
         account = live["accounts"][0] if live.get("accounts") else None
+        self._refresh_industries(mark_source, list(rows.keys()) + [p["symbol"] for p in (account or {}).get("positions", [])])
         for pos in (account or {}).get("positions", []):
             row = rows.setdefault(
                 pos["symbol"],
-                {"symbol": pos["symbol"], "name": pos.get("name"), "realized_pnl": 0.0, "unrealized_pnl": 0.0, "fees": 0.0},
+                {"symbol": pos["symbol"], "name": pos.get("name"), "realized_pnl": 0.0, "unrealized_pnl": 0.0, "fees": 0.0, "market_value": 0.0},
             )
             row["unrealized_pnl"] = round(row["unrealized_pnl"] + float(pos["unrealized_pnl"]), 2)
+            row["market_value"] = round(row["market_value"] + float(pos["market_value"]), 2)
+        equity = float(account["equity"]) if account else 0.0
         items = []
         stock_pnl_sum = 0.0
+        sectors: dict[str, dict] = {}
         for row in rows.values():
             total = round(row["realized_pnl"] + row["unrealized_pnl"], 2)
             stock_pnl_sum += total
-            items.append({**row, "total_pnl": total, "contribution_pct": round(total / initial_cash, 6) if initial_cash else 0.0})
+            sector = industries.resolve(row["symbol"])
+            items.append({**row, "sector": sector, "total_pnl": total,
+                          "contribution_pct": round(total / initial_cash, 6) if initial_cash else 0.0})
+            bucket = sectors.setdefault(sector, {"sector": sector, "total_pnl": 0.0, "market_value": 0.0})
+            bucket["total_pnl"] = round(bucket["total_pnl"] + total, 2)
+            bucket["market_value"] = round(bucket["market_value"] + row["market_value"], 2)
         items.sort(key=lambda x: x["total_pnl"], reverse=True)
-        account_pnl = round(float(account["equity"]) - initial_cash, 2) if account else round(stock_pnl_sum, 2)
+        by_sector = [
+            {
+                "sector": b["sector"],
+                "total_pnl": b["total_pnl"],
+                "contribution_pct": round(b["total_pnl"] / initial_cash, 6) if initial_cash else 0.0,
+                "weight": round(b["market_value"] / equity, 6) if equity > 0 else 0.0,
+            }
+            for b in sectors.values()
+        ]
+        by_sector.sort(key=lambda x: x["total_pnl"], reverse=True)
+        account_pnl = round(equity - initial_cash, 2) if account else round(stock_pnl_sum, 2)
         residual = round(account_pnl - stock_pnl_sum, 2)
         return {
             "symbols": items,
+            "by_sector": by_sector,
             "stock_pnl_total": round(stock_pnl_sum, 2),
             "residual_pnl": residual,  # 现金/逆回购/费用等非个股部分
             "account_pnl": account_pnl,

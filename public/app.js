@@ -310,6 +310,7 @@ function renderPerfMetrics(data) {
     });
   }
   renderPerfAttribution(data);
+  renderPerfSector(data.attribution);
   renderPerfHoldings(data.holdings_analysis);
   $("perfMetrics").innerHTML = groups
     .map(
@@ -331,6 +332,34 @@ function renderPerfMetrics(data) {
       ? "<i>基准不可用（通达信取不到指数日线，把右上「基准源」改为 ricequant 即可叠加沪深300，盯市也更准）</i>"
       : "<i>基准未对齐（把「基准源」换成 ricequant 可叠加沪深300）</i>";
   }
+}
+
+function renderPerfSector(attr) {
+  const panel = $("perfSectorPanel");
+  const sectors = attr && attr.by_sector;
+  if (!sectors || !sectors.length) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const maxAbs = Math.max(...sectors.map((s) => Math.abs(s.total_pnl)), 1);
+  const body = sectors
+    .map((s) => {
+      const pct = (Math.abs(s.total_pnl) / maxAbs) * 100;
+      const pos = s.total_pnl >= 0;
+      const cls = numberClass(s.total_pnl);
+      return `
+        <div class="attrib-row">
+          <div class="attrib-name">${escapeHtml(s.sector)} <span class="sym-code">权重 ${formatPercent(s.weight)}</span></div>
+          <div class="attrib-bar-wrap"><div class="attrib-bar ${pos ? "pos" : "neg"}" style="width:${pct.toFixed(1)}%"></div></div>
+          <div class="attrib-val ${cls}">${formatSigned(s.total_pnl)}</div>
+          <div class="attrib-pct ${cls}">${formatPercent(s.contribution_pct)}</div>
+        </div>`;
+    })
+    .join("");
+  $("perfSector").innerHTML = `
+    <div class="attrib-head"><span>行业(持仓权重)</span><span>盈亏贡献</span><span></span><span>占初始资金</span></div>
+    ${body}`;
 }
 
 function renderPerfHoldings(h) {
