@@ -155,6 +155,16 @@
           </div>
           <div id="perfSector" class="attrib-wrap"></div>
         </section>
+        <section class="panel" id="perfBrinsonPanel">
+          <div class="panel-head compact">
+            <div>
+              <h2>Brinson 归因 · 配置 / 选股</h2>
+              <span>持仓口径单期 Brinson-Fachler:超额收益 = 配置效应 + 选股效应 + 交互(需 ricequant 数据源)</span>
+            </div>
+            <button id="runBrinson" class="primary" type="button">运行 Brinson 归因</button>
+          </div>
+          <div id="perfBrinson" class="brinson-wrap"><span class="muted">点「运行」按当前持仓做行业配置/选股归因(会拉取基准成分股,约数秒)。</span></div>
+        </section>
         <section class="panel" id="perfHoldingsPanel" hidden>
           <div class="panel-head compact">
             <h2>持仓分析 · Holdings</h2>

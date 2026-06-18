@@ -334,6 +334,59 @@ function renderPerfMetrics(data) {
   }
 }
 
+async function runBrinson() {
+  const btn = $("runBrinson");
+  const out = $("perfBrinson");
+  const accountId = $("accountFilter").value.trim() || state.accounts[0]?.id || "";
+  const source = $("perfBenchSource").value || ticketSource();
+  btn.disabled = true;
+  btn.textContent = "归因中…";
+  out.innerHTML = `<span class="muted">正在拉取基准成分股与区间收益…</span>`;
+  try {
+    const params = new URLSearchParams({ account_id: accountId, data_source: source, benchmark: "000300.SH" });
+    const r = await fetchJson(`/api/portfolio/brinson?${params}`);
+    if (r.error) {
+      out.innerHTML = `<span class="muted">${escapeHtml(r.error)}</span>`;
+      return;
+    }
+    const card = (label, v, cls) => `<div class="perf-card"><span>${label}</span><strong class="${cls || ""}">${formatPercent(v)}</strong></div>`;
+    const summary = `<div class="perf-cards" style="margin-bottom:12px">
+      ${card("组合收益", r.portfolio_return, numberClass(r.portfolio_return))}
+      ${card("基准收益", r.benchmark_return, numberClass(r.benchmark_return))}
+      ${card("超额收益", r.total_excess, numberClass(r.total_excess))}
+      ${card("配置效应", r.allocation, numberClass(r.allocation))}
+      ${card("选股效应", r.selection, numberClass(r.selection))}
+      ${card("交互效应", r.interaction, numberClass(r.interaction))}
+    </div>`;
+    const rows = r.sectors
+      .filter((s) => s.portfolio_weight > 0 || Math.abs(s.total) > 0.0001)
+      .map(
+        (s) => `<tr>
+          <td class="strong">${escapeHtml(s.sector)}</td>
+          <td class="num">${formatPercent(s.portfolio_weight)}</td>
+          <td class="num muted">${formatPercent(s.benchmark_weight)}</td>
+          <td class="num ${numberClass(s.portfolio_return)}">${formatPercent(s.portfolio_return)}</td>
+          <td class="num muted">${formatPercent(s.benchmark_return)}</td>
+          <td class="num ${numberClass(s.allocation)}">${formatPercent(s.allocation)}</td>
+          <td class="num ${numberClass(s.selection)}">${formatPercent(s.selection)}</td>
+          <td class="num ${numberClass(s.total)} strong">${formatPercent(s.total)}</td>
+        </tr>`
+      )
+      .join("");
+    out.innerHTML = `${summary}
+      <div class="table-wrap"><table class="brinson-table">
+        <thead><tr><th>行业</th><th>组合权重</th><th>基准权重</th><th>组合收益</th><th>基准收益</th><th>配置</th><th>选股</th><th>合计</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="perf-sub" style="margin-top:8px"><span class="muted">${escapeHtml(r.note)} · 窗口 ${r.start_date}~${r.end_date} · 基准成分 ${r.benchmark_count}</span></div>`;
+  } catch (error) {
+    out.innerHTML = `<span class="muted">归因失败:${escapeHtml(error.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "运行 Brinson 归因";
+  }
+}
+
 function renderPerfSector(attr) {
   const panel = $("perfSectorPanel");
   const sectors = attr && attr.by_sector;
@@ -2709,6 +2762,7 @@ $("watchlist").addEventListener("click", (event) => handleWatchlistClick(event).
 $("blotter").addEventListener("click", (event) => handleBlotterClick(event).catch((error) => showToast(error.message)));
 $("recordSnapshot").addEventListener("click", () => recordSnapshot().catch((error) => showToast(error.message)));
 $("perfBenchSource").addEventListener("change", () => loadPerformance().catch((error) => showToast(error.message)));
+$("runBrinson").addEventListener("click", () => runBrinson().catch((error) => showToast(error.message)));
 $("backtestForm").addEventListener("submit", (event) => runBacktest(event).catch((error) => showToast(error.message)));
 $("btHistory").addEventListener("click", (event) => {
   const row = event.target.closest(".bt-history-row");

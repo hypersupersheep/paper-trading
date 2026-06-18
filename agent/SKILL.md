@@ -108,6 +108,7 @@ POST /api/backtest/run                 跑回测(返回 curve/metrics/benchmark/
 GET  /api/backtest/runs                历史回测
 GET  /api/backtest/{id}/export?format=csv|json   下载
 GET  /api/portfolio/performance        机构级绩效 tearsheet(净值曲线从账本重建;?data_source= 盯市/?benchmark=)。metrics 含收益/风险(回撤+最长水下/下行波动/VaR/CVaR)/风险调整(Sharpe/Sortino/Calmar/Omega)/相对基准(Beta/Alpha/Treynor/信息比率/跟踪误差/上下行捕获);attribution=个股盈亏贡献归因(symbols 个股 + by_sector 行业归因,申万一级口径:行业权重+盈亏贡献;残差对账到总盈亏);holdings_analysis=换手率/集中度(HHI/前五权重)
+GET  /api/portfolio/brinson            Brinson-Fachler 行业归因(持仓口径单期:超额=配置+选股+交互,可对账)。**需 ricequant**(成分股权重+申万行业);?benchmark=000300.SH&data_source=ricequant。较重(拉基准成分),按需调用。Barra 风格归因需更高 license 档位(get_factor_exposure 权限)
 GET  /api/portfolio/summary            组合盯市(带 data_source 时含 day_pnl 当日盈亏=持仓今日浮动+今日已实现)
 GET  /api/accounts/{id}/reverse-repo            国债逆回购记录(独立账本,不在主审计流水)
 POST /api/accounts/{id}/reverse-repo            手动逆回购(默认14:30;rate_mode=market 按GC001实时利率,或 custom 自定义 annual_rate;**当日逆回购只能走这个手动接口**)

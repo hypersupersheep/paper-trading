@@ -291,6 +291,52 @@ class RiceQuantDataConnector:
         except Exception:
             return {}
 
+    def _ensure_init(self):
+        """确保 rqdatac 已用当前 license 初始化;未配置返回 None。"""
+        key = self._license_key()
+        if not key:
+            return None
+        rqdatac = self._import_rqdatac()
+        if self._inited_key != key:
+            rqdatac.init("license", key)
+            self._inited_key = key
+        return rqdatac
+
+    def get_industries(self, symbols: list[str]) -> dict[str, str]:
+        """申万一级行业:{symbol: 行业名}。失败/未配置返回空,绝不抛错。"""
+        if not symbols:
+            return {}
+        try:
+            rqdatac = self._ensure_init()
+            if rqdatac is None:
+                return {}
+            frame = rqdatac.shenwan_instrument_industry([_rq_symbol(s) for s in symbols])
+            out: dict[str, str] = {}
+            if hasattr(frame, "reset_index"):
+                for rec in frame.reset_index().to_dict("records"):
+                    obid = rec.get("order_book_id") or rec.get("index")
+                    name = rec.get("index_name")
+                    if obid and name:
+                        out[_from_rq_symbol(str(obid))] = str(name)
+            return out
+        except Exception:
+            return {}
+
+    def index_weights(self, index_symbol: str, date: str | None = None) -> dict[str, float]:
+        """指数成分股权重:{symbol: weight}(权重和≈1)。失败/未配置返回空。"""
+        try:
+            rqdatac = self._ensure_init()
+            if rqdatac is None:
+                return {}
+            series = rqdatac.index_weights(_rq_symbol(index_symbol), date=date)
+            out: dict[str, float] = {}
+            if hasattr(series, "items"):
+                for obid, weight in series.items():
+                    out[_from_rq_symbol(str(obid))] = float(weight)
+            return out
+        except Exception:
+            return {}
+
     def supported_frequencies(self) -> list[str]:
         return ["5m", "1m", "1d"]
 

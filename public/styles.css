@@ -2377,3 +2377,10 @@ tbody tr:hover .void-btn {
   font-size: 16px;
   font-variant-numeric: tabular-nums;
 }
+
+/* Brinson 归因表 */
+.brinson-table { width: 100%; }
+.brinson-table th { text-align: right; }
+.brinson-table th:first-child, .brinson-table td:first-child { text-align: left; }
+.brinson-table tbody tr { cursor: default; }
+#perfBrinsonPanel .panel-head { align-items: flex-start; }

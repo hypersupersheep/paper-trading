@@ -96,6 +96,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/portfolio/performance":
                 self._json(self._performance(query))
                 return
+            if path == "/api/portfolio/brinson":
+                self._json(self._brinson(query))
+                return
             if path.startswith("/api/scheduler/tasks/") and path.endswith("/ticks"):
                 task_id = unquote(path.removeprefix("/api/scheduler/tasks/").removesuffix("/ticks").strip("/"))
                 self._json({"ticks": self.scheduler.list_ticks(task_id)})
@@ -767,6 +770,81 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             "top5_weight": round(sum(weights[:5]), 4),
             "hhi": hhi,
         }
+
+    def _brinson(self, query: dict) -> dict:
+        """Brinson-Fachler 行业归因(持仓口径单期)。需 ricequant(成分股权重+申万行业)。"""
+        from backend import attribution
+        from backend import industries as ind_mod
+
+        account_id = self._resolve_account_id(query.get("account_id"))
+        account = self.trading.get_account(account_id)
+        if not account:
+            raise ValueError(f"unknown account_id: {account_id}")
+        data_source = query.get("data_source") or app_settings.default_data_source()
+        connector = self.strategies.connectors.get(data_source)
+        if not hasattr(connector, "index_weights") or not hasattr(connector, "get_industries"):
+            return {"error": "Brinson 归因需要 ricequant 数据源(成分股权重 + 申万行业);请把数据源切到 ricequant 并填好 license。"}
+
+        trades = self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
+        voided = self.store.voided_trade_event_ids(account_id)
+        trade_dates = [str(t["timestamp"])[:10] for t in trades if t["id"] not in voided]
+        if not trade_dates:
+            return {"error": "暂无有效成交,无法归因。"}
+        start, end = min(trade_dates), self._today_cn()
+
+        summary = self._portfolio_summary({"account_id": account_id, "data_source": data_source})
+        acct = summary["accounts"][0] if summary.get("accounts") else None
+        positions = (acct or {}).get("positions", [])
+        invested = sum(float(p["market_value"]) for p in positions)
+        if invested <= 0:
+            return {"error": "当前无持仓,持仓口径 Brinson 需要有在持标的。"}
+        holdings = {p["symbol"]: {"weight": float(p["market_value"]) / invested} for p in positions}
+
+        benchmark = (query.get("benchmark") or "000300.SH").upper()
+        bench_weights = connector.index_weights(benchmark)
+        if not bench_weights:
+            return {"error": f"取不到 {benchmark} 的成分股权重(检查 ricequant 权限/日期)。"}
+
+        union = sorted(set(holdings) | set(bench_weights))
+        fetched_ind = connector.get_industries(union)
+        ind_mod.update({s: v for s, v in fetched_ind.items() if v})  # 顺手把真实申万行业写进缓存
+        industry_map = {s: (fetched_ind.get(s) or ind_mod.resolve(s)) for s in union}
+        returns = self._window_returns(connector, union, start, end)
+
+        rows = attribution.build_brinson_rows(
+            holdings=holdings, bench_weights=bench_weights, industries=industry_map, returns=returns,
+            unclassified=ind_mod.UNCLASSIFIED,
+        )
+        result = attribution.brinson_fachler(rows)
+        result.update({
+            "account_id": account_id,
+            "benchmark": benchmark,
+            "start_date": start,
+            "end_date": end,
+            "holdings_count": len(positions),
+            "benchmark_count": len(bench_weights),
+            "return_coverage": sum(1 for s in union if s in returns),
+            "note": "持仓口径单期 Brinson-Fachler;现金未计入(组合权重归一到投资部分);Barra 风格归因需更高 license 档位。",
+        })
+        return result
+
+    def _window_returns(self, connector: Any, symbols: list[str], start: str, end: str) -> dict[str, float]:
+        """区间收益:每个标的 (末收盘/首收盘 - 1)。一次性批量取日线。"""
+        out: dict[str, float] = {}
+        try:
+            bars = connector.get_bars(symbols, frequency="1d", limit=100000, start=start, end=end)
+        except Exception:  # noqa: BLE001
+            return out
+        series: dict[str, list[tuple[str, float]]] = {}
+        for bar in bars:
+            close = float(bar.get("close") or 0)
+            if close > 0:
+                series.setdefault(str(bar["symbol"]).upper(), []).append((str(bar.get("timestamp")), close))
+        for sym, items in series.items():
+            items.sort(key=lambda x: x[0])
+            if len(items) >= 2 and items[0][1] > 0:
+                out[sym] = items[-1][1] / items[0][1] - 1
+        return out
 
     def _record_snapshot(self, payload: dict) -> dict:
         account_id = self._resolve_account_id(payload.get("account_id"))
