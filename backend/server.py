@@ -653,7 +653,80 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 result["benchmark"] = self.performance.compute_benchmark(result["curve"], bench_bars, benchmark_symbol)
             except Exception as exc:  # noqa: BLE001 - 基准失败不影响策略绩效展示。
                 result["benchmark"] = {"symbol": benchmark_symbol, "error": str(exc)}
+
+        # 业绩归因(个股盈亏贡献)+ 持仓分析(换手/集中度)。best-effort,失败不影响主绩效。
+        try:
+            result["attribution"] = self._contribution(account_id, mark_source, account["initial_cash"])
+            result["holdings_analysis"] = self._holdings_analysis(account_id, mark_source, account["initial_cash"])
+        except Exception:  # noqa: BLE001
+            result["attribution"] = None
+            result["holdings_analysis"] = None
         return result
+
+    def _contribution(self, account_id: str, mark_source: str, initial_cash: float) -> dict:
+        """个股盈亏贡献归因:每只票 已实现+浮动 盈亏 ÷ 初始资金 = 对总收益的贡献(百分点)。
+
+        股票贡献之和 + 残差(现金/逆回购/费用)= 账户总盈亏,构成可对账的瀑布。
+        """
+        realized = self.store.realized_pnl_by_symbol({"account_id": account_id})
+        rows: dict[str, dict] = {}
+        for sym in realized["symbols"]:
+            rows[sym["symbol"]] = {
+                "symbol": sym["symbol"],
+                "name": sym["name"],
+                "realized_pnl": sym["realized_pnl"],
+                "unrealized_pnl": 0.0,
+                "fees": sym["fees"],
+            }
+        live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
+        account = live["accounts"][0] if live.get("accounts") else None
+        for pos in (account or {}).get("positions", []):
+            row = rows.setdefault(
+                pos["symbol"],
+                {"symbol": pos["symbol"], "name": pos.get("name"), "realized_pnl": 0.0, "unrealized_pnl": 0.0, "fees": 0.0},
+            )
+            row["unrealized_pnl"] = round(row["unrealized_pnl"] + float(pos["unrealized_pnl"]), 2)
+        items = []
+        stock_pnl_sum = 0.0
+        for row in rows.values():
+            total = round(row["realized_pnl"] + row["unrealized_pnl"], 2)
+            stock_pnl_sum += total
+            items.append({**row, "total_pnl": total, "contribution_pct": round(total / initial_cash, 6) if initial_cash else 0.0})
+        items.sort(key=lambda x: x["total_pnl"], reverse=True)
+        account_pnl = round(float(account["equity"]) - initial_cash, 2) if account else round(stock_pnl_sum, 2)
+        residual = round(account_pnl - stock_pnl_sum, 2)
+        return {
+            "symbols": items,
+            "stock_pnl_total": round(stock_pnl_sum, 2),
+            "residual_pnl": residual,  # 现金/逆回购/费用等非个股部分
+            "account_pnl": account_pnl,
+            "initial_cash": round(initial_cash, 2),
+        }
+
+    def _holdings_analysis(self, account_id: str, mark_source: str, initial_cash: float) -> dict:
+        """持仓分析:累计换手率 + 集中度(头号/前五权重、HHI、持仓数)。"""
+        traded_notional = sum(
+            float(t.get("gross_amount") or 0.0)
+            for t in self.store.trade_summaries({"account_id": account_id, "limit": 100000})
+            if t.get("kind") == "trade" and not t.get("voided")
+        )
+        turnover = round(traded_notional / initial_cash, 4) if initial_cash else 0.0
+        live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
+        account = live["accounts"][0] if live.get("accounts") else None
+        positions = (account or {}).get("positions", [])
+        equity = float(account["equity"]) if account else 0.0
+        weights = sorted(
+            (float(p["market_value"]) / equity for p in positions if equity > 0),
+            reverse=True,
+        )
+        hhi = round(sum(w * w for w in weights), 4)
+        return {
+            "turnover": turnover,
+            "num_holdings": len(positions),
+            "top_weight": round(weights[0], 4) if weights else 0.0,
+            "top5_weight": round(sum(weights[:5]), 4),
+            "hhi": hhi,
+        }
 
     def _record_snapshot(self, payload: dict) -> dict:
         account_id = self._resolve_account_id(payload.get("account_id"))

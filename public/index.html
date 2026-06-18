@@ -141,6 +141,20 @@
 
       <section class="perf-view" data-view="performance">
         <div class="perf-metrics" id="perfMetrics"></div>
+        <section class="panel" id="perfAttributionPanel" hidden>
+          <div class="panel-head compact">
+            <h2>业绩归因 · 个股盈亏贡献</h2>
+            <span>每只票 已实现+浮动 盈亏对总收益的贡献(平均成本法);残差=现金/逆回购/费用</span>
+          </div>
+          <div id="perfAttribution" class="attrib-wrap"></div>
+        </section>
+        <section class="panel" id="perfHoldingsPanel" hidden>
+          <div class="panel-head compact">
+            <h2>持仓分析 · Holdings</h2>
+            <span>换手率与集中度</span>
+          </div>
+          <div id="perfHoldings" class="perf-cards"></div>
+        </section>
         <section class="panel perf-chart-panel">
           <div class="panel-head compact">
             <h2>净值曲线 · Equity Curve</h2>

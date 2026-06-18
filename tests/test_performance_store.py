@@ -63,6 +63,33 @@ class PerformanceStoreTest(unittest.TestCase):
         # 回撤序列末点应回到 0(120 是新高)
         self.assertEqual(result["curve"][-1]["drawdown"], 0.0)
 
+    def test_institutional_metric_suite_present(self) -> None:
+        from backend.performance_store import metrics_from_curve
+
+        curve = [{"time": f"2026-{m:02d}-15", "equity": eq} for m, eq in
+                 enumerate([100, 108, 95, 112, 120, 118, 130, 125, 140, 135, 150, 160], start=1)]
+        result = metrics_from_curve(curve, 100)
+        m = result["metrics"]
+        for key in ("sortino", "downside_volatility", "var_95", "cvar_95", "omega",
+                    "max_drawdown_days", "best_month", "worst_month", "positive_month_rate"):
+            self.assertIn(key, m)
+        self.assertGreater(m["sortino"], 0)  # 整体上行序列 Sortino 为正
+        self.assertGreaterEqual(m["var_95"], 0)  # VaR 以正数表示损失幅度
+        self.assertGreater(m["max_drawdown_days"], 0)  # 中途有回撤
+        self.assertTrue(result["monthly_returns"])  # 月度收益已聚合
+
+    def test_benchmark_capture_and_tracking_error(self) -> None:
+        from backend.performance_store import benchmark_overlay
+
+        curve = [{"time": f"2026-06-{8 + i:02d}", "equity": eq}
+                 for i, eq in enumerate([100, 110, 99, 120, 118, 130])]
+        bench = [{"timestamp": f"2026-06-{8 + i:02d}T07:00:00+00:00", "close": c}
+                 for i, c in enumerate([10.0, 11.0, 10.5, 11.0, 10.8, 11.2])]
+        result = benchmark_overlay(curve, bench, "000300.SH")
+        for key in ("tracking_error", "up_capture", "down_capture", "capture_ratio", "treynor"):
+            self.assertIn(key, result["metrics"])
+        self.assertGreaterEqual(result["metrics"]["tracking_error"], 0)
+
     def test_benchmark_alignment_and_excess_return(self) -> None:
         curve = [
             {"time": "2026-06-08", "equity": 100.0},

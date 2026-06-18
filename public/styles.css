@@ -2309,3 +2309,71 @@ tbody tr:hover .void-btn {
   text-decoration: none;
   opacity: 1;
 }
+
+/* 业绩归因:个股贡献瀑布 */
+.attrib-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.attrib-head {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) 1.2fr 110px 110px;
+  gap: 12px;
+  padding: 6px 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.attrib-head span:nth-child(2),
+.attrib-head span:nth-child(4) {
+  text-align: right;
+}
+.attrib-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.4fr) 1.2fr 110px 110px;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12.5px;
+}
+.attrib-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.attrib-bar-wrap {
+  height: 14px;
+  display: flex;
+  align-items: center;
+}
+.attrib-bar {
+  height: 14px;
+  border-radius: 3px;
+  min-width: 2px;
+}
+.attrib-bar.pos {
+  background: var(--gain);
+}
+.attrib-bar.neg {
+  background: var(--loss);
+}
+.attrib-val,
+.attrib-pct {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.attrib-total {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 12px 4px 2px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.attrib-total strong {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}

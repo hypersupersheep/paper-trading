@@ -220,8 +220,18 @@ def benchmark_overlay(curve: list[dict[str, Any]], bench_bars: list[dict[str, An
     corr = cov / (std_s * std_b) if std_s > 0 and std_b > 0 else 0.0
     diff = [a - b for a, b in zip(r_s, r_b)]
     std_diff = statistics.stdev(diff) if len(diff) >= 2 else 0.0
+    tracking_error = std_diff * math.sqrt(TRADING_DAYS)
     info_ratio = (statistics.fmean(diff) / std_diff) * math.sqrt(TRADING_DAYS) if std_diff > 0 else 0.0
     win_vs_bench = sum(1 for a, b in zip(r_s, r_b) if a > b) / size
+    # Treynor:年化超额(rf=0)/ Beta。Jensen α 即上面的 alpha_ann。
+    strat_ann = (1 + mean_s) ** TRADING_DAYS - 1
+    treynor = strat_ann / beta if beta else 0.0
+    # 上行/下行捕获比:基准涨/跌的日子里,组合相对基准的几何平均表现。
+    up_idx = [i for i, b in enumerate(r_b) if b > 0]
+    down_idx = [i for i, b in enumerate(r_b) if b < 0]
+    up_capture = _capture(r_s, r_b, up_idx)
+    down_capture = _capture(r_s, r_b, down_idx)
+    capture_ratio = up_capture / down_capture if down_capture else 0.0
 
     return {
         "symbol": symbol,
@@ -231,11 +241,28 @@ def benchmark_overlay(curve: list[dict[str, Any]], bench_bars: list[dict[str, An
             "excess_return": round(strat_cum - bench_cum, 6),
             "beta": round(beta, 3),
             "alpha_annualized": round(alpha_ann, 6),
+            "treynor": round(treynor, 4),
             "information_ratio": round(info_ratio, 3),
+            "tracking_error": round(tracking_error, 6),
             "correlation": round(corr, 3),
             "win_vs_benchmark": round(win_vs_bench, 4),
+            "up_capture": round(up_capture, 4),
+            "down_capture": round(down_capture, 4),
+            "capture_ratio": round(capture_ratio, 3),
         },
     }
+
+
+def _capture(r_s: list[float], r_b: list[float], idx: list[int]) -> float:
+    """捕获比:选定日子里 组合几何累计 / 基准几何累计。"""
+    if not idx:
+        return 0.0
+    prod_s = math.prod(1 + r_s[i] for i in idx)
+    prod_b = math.prod(1 + r_b[i] for i in idx)
+    n = len(idx)
+    geo_s = prod_s ** (1 / n) - 1
+    geo_b = prod_b ** (1 / n) - 1
+    return geo_s / geo_b if geo_b else 0.0
 
 
 def metrics_from_curve(curve: list[dict[str, Any]], initial_cash: float) -> dict[str, Any]:
@@ -268,18 +295,61 @@ def metrics_from_curve(curve: list[dict[str, Any]], initial_cash: float) -> dict
     win_rate = len(wins) / (len(wins) + len(losses)) if (wins or losses) else 0.0
     profit_loss_ratio = statistics.fmean(wins) / abs(statistics.fmean(losses)) if wins and losses else 0.0
 
+    # —— 机构级补充指标(全部从净值收益序列即可算)——
+    # 下行风险:Sortino(目标 0)、年化下行波动。
+    downside = [min(r, 0.0) for r in returns]
+    downside_dev = math.sqrt(sum(d * d for d in downside) / periods)
+    sortino = (mean_r / downside_dev) * math.sqrt(TRADING_DAYS) if downside_dev > 0 else 0.0
+    ann_downside_vol = downside_dev * math.sqrt(TRADING_DAYS)
+    # 历史 VaR / CVaR(95%,单日损失,正数表示亏损幅度)。
+    var_95 = cvar_95 = 0.0
+    if periods >= 20:
+        ordered = sorted(returns)
+        cutoff = max(1, int(math.floor(periods * 0.05)))
+        tail = ordered[:cutoff]
+        var_95 = -ordered[cutoff - 1]
+        cvar_95 = -statistics.fmean(tail)
+    # Omega(阈值 0)= 正收益总和 / 负收益总和绝对值。
+    gain_sum = sum(r for r in returns if r > 0)
+    loss_sum = -sum(r for r in returns if r < 0)
+    omega = gain_sum / loss_sum if loss_sum > 0 else 0.0
+    # 回撤分析:最长水下天数 + 是否已恢复。
+    dd_duration, recovered = _drawdown_duration(curve)
+    # 单日极值 + 月度统计。
+    best_day, worst_day = max(returns), min(returns)
+    months = _monthly_returns(curve)
+    month_vals = [m["return"] for m in months]
+    pos_months = sum(1 for m in month_vals if m > 0)
+    up_m = [m for m in month_vals if m > 0]
+    down_m = [m for m in month_vals if m < 0]
+
     return {
         "points": len(curve),
         "curve": curve,
+        "monthly_returns": months,
         "metrics": {
             "cumulative_return": round(cumulative, 6),
             "annualized_return": round(annualized, 6),
             "annualized_volatility": round(ann_vol, 6),
+            "downside_volatility": round(ann_downside_vol, 6),
             "sharpe": round(sharpe, 3),
-            "max_drawdown": round(max_drawdown, 6),
+            "sortino": round(sortino, 3),
             "calmar": round(calmar, 3),
+            "omega": round(omega, 3),
+            "max_drawdown": round(max_drawdown, 6),
+            "max_drawdown_days": dd_duration,
+            "drawdown_recovered": recovered,
+            "var_95": round(var_95, 6),
+            "cvar_95": round(cvar_95, 6),
+            "best_day": round(best_day, 6),
+            "worst_day": round(worst_day, 6),
             "daily_win_rate": round(win_rate, 4),
             "profit_loss_ratio": round(profit_loss_ratio, 3),
+            "best_month": round(max(month_vals), 6) if month_vals else 0.0,
+            "worst_month": round(min(month_vals), 6) if month_vals else 0.0,
+            "positive_month_rate": round(pos_months / len(month_vals), 4) if month_vals else 0.0,
+            "avg_up_month": round(statistics.fmean(up_m), 6) if up_m else 0.0,
+            "avg_down_month": round(statistics.fmean(down_m), 6) if down_m else 0.0,
             "trading_days": periods,
             "start_equity": round(equities[0], 2),
             "end_equity": round(equities[-1], 2),
@@ -288,16 +358,64 @@ def metrics_from_curve(curve: list[dict[str, Any]], initial_cash: float) -> dict
     }
 
 
+def _drawdown_duration(curve: list[dict[str, Any]]) -> tuple[int, bool]:
+    """最长水下持续(从创新高到恢复新高之间的点数)+ 当前是否已回到新高。"""
+    peak = -math.inf
+    longest = 0
+    current = 0
+    underwater = False
+    for point in curve:
+        if point["equity"] >= peak:
+            peak = point["equity"]
+            longest = max(longest, current)
+            current = 0
+            underwater = False
+        else:
+            current += 1
+            underwater = True
+    longest = max(longest, current)
+    return longest, not underwater
+
+
+def _monthly_returns(curve: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按自然月聚合月收益(月末净值环比)。每月用当月最后一个净值点。"""
+    by_month: dict[str, float] = {}
+    for point in curve:
+        by_month[str(point["time"])[:7]] = point["equity"]
+    items = sorted(by_month.items())
+    out: list[dict[str, Any]] = []
+    prev = None
+    for month, equity in items:
+        if prev is not None and prev > 0:
+            out.append({"month": month, "return": round(equity / prev - 1, 6)})
+        prev = equity
+    return out
+
+
 def _empty_metrics() -> dict[str, Any]:
     return {
         "cumulative_return": 0.0,
         "annualized_return": 0.0,
         "annualized_volatility": 0.0,
+        "downside_volatility": 0.0,
         "sharpe": 0.0,
-        "max_drawdown": 0.0,
+        "sortino": 0.0,
         "calmar": 0.0,
+        "omega": 0.0,
+        "max_drawdown": 0.0,
+        "max_drawdown_days": 0,
+        "drawdown_recovered": True,
+        "var_95": 0.0,
+        "cvar_95": 0.0,
+        "best_day": 0.0,
+        "worst_day": 0.0,
         "daily_win_rate": 0.0,
         "profit_loss_ratio": 0.0,
+        "best_month": 0.0,
+        "worst_month": 0.0,
+        "positive_month_rate": 0.0,
+        "avg_up_month": 0.0,
+        "avg_down_month": 0.0,
         "trading_days": 0,
     }
 

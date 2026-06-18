@@ -253,14 +253,17 @@ function renderPerfMetrics(data) {
   const num = (value, digits = 2) => (value === undefined || value === null ? "--" : Number(value).toFixed(digits));
   const bench = data.benchmark;
   const bm = (bench && bench.metrics) || {};
-  // 按 quantstats 思路分三组:收益 / 风险 / 相对基准。
+  const ddDays = m.max_drawdown_days ? `${formatNumber(m.max_drawdown_days)}天${m.drawdown_recovered ? "(已恢复)" : "(未恢复)"}` : "--";
+  // 机构口径分四组:收益 / 风险 / 风险调整 / 相对基准。
   const groups = [
     {
       title: "收益",
       cards: [
         { label: "累计收益", value: formatPercent(m.cumulative_return), cls: numberClass(m.cumulative_return) },
         { label: "年化收益", value: formatPercent(m.annualized_return), cls: numberClass(m.annualized_return) },
-        { label: "成交笔数", value: formatNumber(data.trade_count) },
+        { label: "最佳月", value: formatPercent(m.best_month), cls: numberClass(m.best_month) },
+        { label: "最差月", value: formatPercent(m.worst_month), cls: numberClass(m.worst_month) },
+        { label: "正收益月占比", value: formatPercent(m.positive_month_rate) },
         { label: "交易天数", value: formatNumber(m.trading_days) },
       ],
     },
@@ -268,9 +271,21 @@ function renderPerfMetrics(data) {
       title: "风险",
       cards: [
         { label: "最大回撤", value: formatPercent(m.max_drawdown), cls: "negative" },
+        { label: "最长水下", value: ddDays },
         { label: "年化波动", value: formatPercent(m.annualized_volatility) },
+        { label: "下行波动", value: formatPercent(m.downside_volatility) },
+        { label: "VaR 95%", value: formatPercent(m.var_95), cls: "negative" },
+        { label: "CVaR 95%", value: formatPercent(m.cvar_95), cls: "negative" },
+        { label: "最差单日", value: formatPercent(m.worst_day), cls: "negative" },
+      ],
+    },
+    {
+      title: "风险调整",
+      cards: [
         { label: "夏普比率", value: num(m.sharpe), cls: numberClass(m.sharpe) },
+        { label: "索提诺 Sortino", value: num(m.sortino), cls: numberClass(m.sortino) },
         { label: "Calmar", value: num(m.calmar), cls: numberClass(m.calmar) },
+        { label: "Omega", value: num(m.omega), cls: numberClass(m.omega - 1) },
         { label: "日胜率", value: formatPercent(m.daily_win_rate) },
         { label: "盈亏比", value: num(m.profit_loss_ratio) },
       ],
@@ -284,11 +299,18 @@ function renderPerfMetrics(data) {
         { label: "超额收益", value: formatPercent(bm.excess_return), cls: numberClass(bm.excess_return) },
         { label: "Beta", value: num(bm.beta) },
         { label: "年化 Alpha", value: formatPercent(bm.alpha_annualized), cls: numberClass(bm.alpha_annualized) },
+        { label: "Treynor", value: formatPercent(bm.treynor), cls: numberClass(bm.treynor) },
         { label: "信息比率", value: num(bm.information_ratio), cls: numberClass(bm.information_ratio) },
+        { label: "跟踪误差", value: formatPercent(bm.tracking_error) },
+        { label: "上行捕获", value: formatPercent(bm.up_capture) },
+        { label: "下行捕获", value: formatPercent(bm.down_capture) },
+        { label: "捕获比", value: num(bm.capture_ratio), cls: numberClass(bm.capture_ratio - 1) },
         { label: "跑赢基准天数", value: formatPercent(bm.win_vs_benchmark) },
       ],
     });
   }
+  renderPerfAttribution(data);
+  renderPerfHoldings(data.holdings_analysis);
   $("perfMetrics").innerHTML = groups
     .map(
       (g) => `<div class="perf-group">
@@ -309,6 +331,68 @@ function renderPerfMetrics(data) {
       ? "<i>基准不可用（通达信取不到指数日线，把右上「基准源」改为 ricequant 即可叠加沪深300，盯市也更准）</i>"
       : "<i>基准未对齐（把「基准源」换成 ricequant 可叠加沪深300）</i>";
   }
+}
+
+function renderPerfHoldings(h) {
+  const panel = $("perfHoldingsPanel");
+  if (!h) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const cards = [
+    { label: "累计换手", value: `${(Number(h.turnover) * 100).toFixed(1)}%` },
+    { label: "持仓数", value: formatNumber(h.num_holdings) },
+    { label: "头号权重", value: formatPercent(h.top_weight) },
+    { label: "前五权重", value: formatPercent(h.top5_weight) },
+    { label: "集中度 HHI", value: Number(h.hhi).toFixed(3) },
+  ];
+  $("perfHoldings").innerHTML = cards
+    .map((c) => `<div class="perf-card"><span>${c.label}</span><strong>${c.value}</strong></div>`)
+    .join("");
+}
+
+function renderPerfAttribution(data) {
+  const panel = $("perfAttributionPanel");
+  const attr = data.attribution;
+  if (!attr || !attr.symbols || !attr.symbols.length) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  // 含残差(现金/逆回购/费用)一并展示,使瀑布对账到账户总盈亏。
+  const rows = [...attr.symbols];
+  if (Math.abs(attr.residual_pnl) >= 1) {
+    rows.push({ symbol: "—", name: "现金/逆回购/费用", total_pnl: attr.residual_pnl, contribution_pct: attr.residual_pnl / (attr.initial_cash || 1), residual: true });
+  }
+  const maxAbs = Math.max(...rows.map((r) => Math.abs(r.total_pnl)), 1);
+  const body = rows
+    .map((r) => {
+      const pct = (Math.abs(r.total_pnl) / maxAbs) * 100;
+      const pos = r.total_pnl >= 0;
+      const cls = numberClass(r.total_pnl);
+      const label = r.residual ? r.name : `${escapeHtml(r.name || r.symbol)}${r.name && r.name !== r.symbol ? ` <span class="sym-code">${escapeHtml(r.symbol)}</span>` : ""}`;
+      return `
+        <div class="attrib-row">
+          <div class="attrib-name">${label}</div>
+          <div class="attrib-bar-wrap">
+            <div class="attrib-bar ${pos ? "pos" : "neg"}" style="width:${pct.toFixed(1)}%"></div>
+          </div>
+          <div class="attrib-val ${cls}">${formatSigned(r.total_pnl)}</div>
+          <div class="attrib-pct ${cls}">${formatPercent(r.contribution_pct)}</div>
+        </div>`;
+    })
+    .join("");
+  $("perfAttribution").innerHTML = `
+    <div class="attrib-head">
+      <span>标的</span><span>贡献(盈亏)</span><span></span><span>占初始资金</span>
+    </div>
+    ${body}
+    <div class="attrib-total">
+      <span>账户总盈亏</span>
+      <strong class="${numberClass(attr.account_pnl)}">${formatSigned(attr.account_pnl)}</strong>
+      <span class="muted">个股合计 ${formatSigned(attr.stock_pnl_total)} · 残差 ${formatSigned(attr.residual_pnl)}</span>
+    </div>`;
 }
 
 // 金额简写:1.23亿 / 4560.0万 / 1234,便于 Y 轴与提示读数(学专业 tearsheet)。
