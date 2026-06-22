@@ -356,6 +356,7 @@
           </label>
           <div class="form-grid">
             <label>账户名<input id="newAccountName" value="A-Share Test" /></label>
+            <label>交易员 owner<input id="newAccountOwner" placeholder="留空=用账户名" /></label>
             <label>初始资金<input id="newInitialCash" type="number" value="10000000" /></label>
             <label>佣金率(双边)<input id="newCommissionRate" type="number" step="0.00001" value="0.00008" /></label>
             <label>印花税率(卖出)<input id="newStampDutyRate" type="number" step="0.0001" value="0.001" /></label>
@@ -670,6 +671,24 @@ def on_bar(ctx, bar):
             <label class="storage-move"><input id="storageMove" type="checkbox" checked />把现有数据复制过去</label>
           </div>
           <div id="storageMsg" class="storage-msg"></div>
+        </div>
+      </section>
+
+      <section class="panel admin-link-panel" data-view="data">
+        <div class="panel-head compact">
+          <h2>Admin 对接</h2>
+          <span>把本机账户登记到老板的 Admin 监控台(局域网)· 留空=纯本地不登记</span>
+        </div>
+        <div class="form-grid">
+          <label>Admin 地址<input id="adminUrl" placeholder="http://老板机IP:9000" /></label>
+          <label>Admin Token<input id="adminToken" type="password" placeholder="留空=保留原值" /></label>
+          <label>本机名称<input id="adminNodeName" placeholder="如 Alice 的机器" /></label>
+          <label>本机地址(可选)<input id="adminBaseUrl" placeholder="留空=自动取局域网IP:端口" /></label>
+        </div>
+        <div class="admin-link-actions">
+          <button id="adminLinkSave" type="button" class="primary">保存</button>
+          <button id="adminLinkRegisterAll" type="button">登记现有全部账户</button>
+          <span id="adminLinkStatus" class="muted"></span>
         </div>
       </section>
 

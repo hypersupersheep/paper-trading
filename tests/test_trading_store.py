@@ -737,6 +737,22 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(row["realized_pnl"], sell["realized_pnl"])
         self.assertEqual(board["total_realized_pnl"], sell["realized_pnl"])
 
+    def test_account_owner_defaults_to_name_and_is_editable(self) -> None:
+        # 不传 owner → 回退账户名
+        a = self.trading.create_account({"id": "acct_o1", "name": "Alice 主账户", "initial_cash": 1_000_000})
+        self.assertEqual(a["owner"], "Alice 主账户")
+        # 传 owner → 用之
+        b = self.trading.create_account(
+            {"id": "acct_o2", "name": "策略B", "owner": "Bob", "initial_cash": 1_000_000}
+        )
+        self.assertEqual(b["owner"], "Bob")
+        # 可改 owner
+        c = self.trading.update_account("acct_o2", {"owner": "Bob Chen"})
+        self.assertEqual(c["owner"], "Bob Chen")
+        # 组合概览也带 owner
+        summary = self.trading.get_portfolio_summary("acct_o2")
+        self.assertEqual(summary["accounts"][0]["owner"], "Bob Chen")
+
     def test_update_account_changes_config_keeps_initial_cash(self) -> None:
         updated = self.trading.update_account(
             "acct_test",

@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import socket
+import threading
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from backend import admin_link
 from backend import app_settings
 from backend import names as security_names
 from backend import paths
@@ -89,6 +93,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/broker/orders":
                 self._json({"orders": self.trading.list_orders(query)})
+                return
+            if path == "/api/admin-link":
+                self._json(admin_link.public_view())
                 return
             if path == "/api/portfolio/summary":
                 self._json(self._portfolio_summary(query))
@@ -225,7 +232,16 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if path == "/api/accounts":
-                self._json({"account": self.trading.create_account(payload)}, HTTPStatus.CREATED)
+                account = self.trading.create_account(payload)
+                self._register_account_with_admin(account)  # 本地+远程开户都经此,登记到 Admin
+                self._json({"account": account}, HTTPStatus.CREATED)
+                return
+            if path == "/api/admin-link":
+                admin_link.save(payload)
+                self._json(admin_link.public_view())
+                return
+            if path == "/api/admin-link/register-all":
+                self._json(self._register_all_accounts(), HTTPStatus.CREATED)
                 return
             if path == "/api/strategies":
                 self._json({"strategy": self.strategies.create_strategy(payload)}, HTTPStatus.CREATED)
@@ -283,7 +299,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/api/accounts/") and path.endswith("/update"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/update").strip("/"))
-                self._json({"account": self.trading.update_account(account_id, payload)}, HTTPStatus.CREATED)
+                account = self.trading.update_account(account_id, payload)
+                self._register_account_with_admin(account)  # 改名/改 owner 后同步给 Admin(幂等)
+                self._json({"account": account}, HTTPStatus.CREATED)
                 return
             if path.startswith("/api/audit/trades/") and path.endswith("/void"):
                 trade_event_id = unquote(path.removeprefix("/api/audit/trades/").removesuffix("/void").strip("/"))
@@ -375,6 +393,69 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 security_names.update(fetched)
         except Exception:
             pass
+
+    # ———————————————— Admin 账户级登记(opt-in) ————————————————
+    def _node_descriptor(self) -> dict[str, Any]:
+        cfg = admin_link.load()
+        try:
+            port = self.server.server_address[1]
+        except Exception:  # noqa: BLE001
+            port = int(os.environ.get("PORT") or 8000)
+        base_url = cfg.get("base_url") or f"http://{admin_link.lan_ip()}:{port}"
+        return {
+            "id": admin_link.node_id(),
+            "name": cfg.get("node_name") or socket.gethostname().split(".")[0],
+            "base_url": base_url,
+            "token": "",  # 节点 admin-token 在 node_patch 落地后填;暂空
+            "api_version": API_VERSION,
+        }
+
+    def _register_account_with_admin(self, account: dict[str, Any]) -> None:
+        """开户/改配置成功后,把账户身份登记到 Admin(§3.1)。未配置 Admin 则跳过。
+
+        best-effort:后台线程发,Admin 不可达也绝不影响本地开户。幂等键 (node.id, account.id)。
+        """
+        cfg = admin_link.load()
+        if not cfg.get("admin_url"):
+            return
+        payload = {
+            "node": self._node_descriptor(),
+            "account": {
+                "id": account["id"],
+                "owner": account.get("owner") or account.get("name"),
+                "name": account.get("name"),
+                "currency": account.get("currency", "CNY"),
+                "market": account.get("market", "CN_A"),
+                "initial_cash": account.get("initial_cash"),
+            },
+        }
+        threading.Thread(
+            target=self._post_admin,
+            args=(cfg, "/api/admin/accounts/register", payload),
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _post_admin(cfg: dict[str, Any], path: str, payload: dict[str, Any]) -> None:
+        try:
+            url = str(cfg["admin_url"]).rstrip("/") + path
+            data = json.dumps(payload).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if cfg.get("admin_token"):
+                headers["X-Admin-Token"] = cfg["admin_token"]
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception:  # noqa: BLE001 - 登记失败不影响本地;Admin 上线后可手动「登记全部」补
+            pass
+
+    def _register_all_accounts(self) -> dict[str, Any]:
+        """把本节点现有全部账户登记到 Admin(Admin 上线后一次性补登)。"""
+        if not admin_link.is_enabled():
+            return {"registered": 0, "error": "未配置 Admin 地址"}
+        accounts = self.trading.list_accounts()
+        for account in accounts:
+            self._register_account_with_admin(account)
+        return {"registered": len(accounts), "node_id": admin_link.node_id()}
 
     def _refresh_industries(self, data_source: Any, symbols: list[str]) -> None:
         """best-effort:用数据源给未分类的标的取申万行业并缓存。连接器未提供 get_industries 则跳过。"""

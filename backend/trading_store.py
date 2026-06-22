@@ -165,6 +165,8 @@ class TradingStore:
                 """
             )
             self._ensure_column(conn, "reverse_repo_records", "rate_source", "TEXT NOT NULL DEFAULT 'custom'")
+            # 账户加 owner(交易员标识),供 Admin 按人分组/排名;缺省空串,读取时回退到 name。
+            self._ensure_column(conn, "accounts", "owner", "TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -220,9 +222,11 @@ class TradingStore:
         account_id = payload.get("id") or f"acct_{uuid.uuid4().hex[:10]}"
         now = _now()
         initial_cash = _float(payload.get("initial_cash"), 10_000_000.0)
+        name = payload.get("name") or "Paper Account"
         account = {
             "id": account_id,
-            "name": payload.get("name") or "Paper Account",
+            "name": name,
+            "owner": (str(payload.get("owner")).strip() if payload.get("owner") else "") or name,
             "initial_cash": initial_cash,
             "unallocated_cash": initial_cash,
             "currency": payload.get("currency") or "CNY",
@@ -245,16 +249,17 @@ class TradingStore:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    id, name, initial_cash, unallocated_cash, currency, market,
+                    id, name, owner, initial_cash, unallocated_cash, currency, market,
                     commission_rate, min_commission, stamp_duty_rate, slippage_model,
                     slippage_value, auto_reverse_repo_enabled, reverse_repo_annual_rate,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account["id"],
                     account["name"],
+                    account["owner"],
                     account["initial_cash"],
                     account["unallocated_cash"],
                     account["currency"],
@@ -302,6 +307,7 @@ class TradingStore:
 
         updatable = {
             "name": lambda v: str(v).strip() or account["name"],
+            "owner": lambda v: str(v).strip() or account.get("owner") or account["name"],
             "commission_rate": lambda v: _float(v, account["commission_rate"]),
             "min_commission": lambda v: _float(v, account["min_commission"]),
             "stamp_duty_rate": lambda v: _float(v, account["stamp_duty_rate"]),
@@ -1743,6 +1749,7 @@ class TradingStore:
         return {
             "id": account["id"],
             "name": account["name"],
+            "owner": account.get("owner") or account["name"],
             "currency": account["currency"],
             "market": account["market"],
             "initial_cash": _money(account["initial_cash"]),

@@ -1242,6 +1242,40 @@ async function loadStorageLocation() {
   $("storageNote").textContent = data.is_custom ? "（自定义位置）" : "（默认位置）";
 }
 
+async function loadAdminLink() {
+  const v = await fetchJson("/api/admin-link");
+  $("adminUrl").value = v.admin_url || "";
+  $("adminNodeName").value = v.node_name || "";
+  $("adminBaseUrl").value = v.base_url || "";
+  $("adminToken").placeholder = v.has_token ? "已设置 · 留空保留" : "可空";
+  $("adminLinkStatus").textContent = v.enabled
+    ? `已对接 · 节点 ${v.node_id}`
+    : `未对接(纯本地,不登记)· 节点 ${v.node_id || "—"}`;
+}
+
+async function saveAdminLink() {
+  const body = {
+    admin_url: $("adminUrl").value.trim(),
+    node_name: $("adminNodeName").value.trim(),
+    base_url: $("adminBaseUrl").value.trim(),
+  };
+  const tok = $("adminToken").value.trim();
+  if (tok) body.admin_token = tok; // 留空=保留原 token
+  await postJson("/api/admin-link", body);
+  $("adminToken").value = "";
+  await loadAdminLink();
+  showToast("Admin 对接配置已保存");
+}
+
+async function registerAllAccounts() {
+  const r = await postJson("/api/admin-link/register-all", {});
+  if (r.error) {
+    showToast(r.error);
+    return;
+  }
+  showToast(`已向 Admin 登记本机 ${r.registered} 个账户`);
+}
+
 async function handleStoragePick() {
   const api = nativeApi();
   if (api && api.pick_folder) {
@@ -2058,6 +2092,7 @@ async function refreshAll(selectEventId = null) {
   await loadPerformance().catch(() => {});
   await loadBacktestRuns().catch(() => {});
   await loadStorageLocation().catch(() => {});
+  await loadAdminLink().catch(() => {});
   if (!state.chart.bars.length) await loadChart();
   if (selectEventId) await selectEvent(selectEventId);
 }
@@ -2077,6 +2112,7 @@ function applyAccountEditMode() {
   const account = state.accounts.find((a) => a.id === accountId);
   if (!account) return;
   $("newAccountName").value = account.name;
+  $("newAccountOwner").value = account.owner && account.owner !== account.name ? account.owner : "";
   $("newInitialCash").value = account.initial_cash;
   $("newCommissionRate").value = account.commission_rate;
   $("newStampDutyRate").value = account.stamp_duty_rate;
@@ -2093,6 +2129,7 @@ async function createAccount(event) {
   const editId = $("accountEditTarget").value;
   const config = {
     name: $("newAccountName").value.trim(),
+    owner: $("newAccountOwner").value.trim(),
     commission_rate: Number($("newCommissionRate").value),
     stamp_duty_rate: Number($("newStampDutyRate").value),
     slippage_model: $("newSlippageModel").value,
@@ -2806,6 +2843,8 @@ async function setDefaultDataSource(source) {
 }
 $("strategyBoard").addEventListener("click", (event) => handleStrategyBoardAction(event).catch((error) => showToast(error.message)));
 $("loadQuote").addEventListener("click", () => loadQuote().catch((error) => showToast(error.message)));
+$("adminLinkSave").addEventListener("click", () => saveAdminLink().catch((error) => showToast(error.message)));
+$("adminLinkRegisterAll").addEventListener("click", () => registerAllAccounts().catch((error) => showToast(error.message)));
 $("storagePick").addEventListener("click", () => handleStoragePick().catch((error) => showToast(error.message)));
 $("storageReset").addEventListener("click", () => resetStorageLocation().catch((error) => showToast(error.message)));
 $("accountForm").addEventListener("submit", (event) => createAccount(event).catch((error) => showToast(error.message)));

@@ -2384,3 +2384,12 @@ tbody tr:hover .void-btn {
 .brinson-table th:first-child, .brinson-table td:first-child { text-align: left; }
 .brinson-table tbody tr { cursor: default; }
 #perfBrinsonPanel .panel-head { align-items: flex-start; }
+
+/* Admin 对接卡 */
+.admin-link-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
