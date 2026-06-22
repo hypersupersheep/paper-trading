@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from backend import admin_link
 from backend import app_settings
+from backend import events
 from backend import names as security_names
 from backend import paths
 from backend import repo
@@ -57,6 +58,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
         if not self._guard_remote():
+            return
+        if path == "/api/stream":
+            self._stream()
             return
 
         try:
@@ -226,6 +230,36 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - keeps local server usable during prototype work.
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _stream(self) -> None:
+        """SSE 事件流:成交等事件即推,Admin 据此从轮询切事件驱动(成交秒级上墙)。
+
+        走入站鉴权(do_GET 顶部 _guard_remote 已校验:远程须带 node.token)。每个连接独立线程
+        (ThreadingHTTPServer),长连不阻塞别的请求。15s 心跳兼检测断连。
+        """
+        import queue
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        q = events.subscribe()
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    evt = q.get(timeout=15)
+                    self.wfile.write(f"data: {json.dumps(evt, ensure_ascii=False)}\n\n".encode("utf-8"))
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")  # 心跳,顺带探活
+                self.wfile.flush()
+        except Exception:  # noqa: BLE001 - 客户端断开/写失败 → 清理退出
+            pass
+        finally:
+            events.unsubscribe(q)
+
     def _guard_remote(self) -> bool:
         """节点入站鉴权:本机放行;远程须带 X-Admin-Token=node_token。未过则 401。"""
         if admin_link.authorize(self.client_address[0], self.headers.get("X-Admin-Token")):
@@ -246,6 +280,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/accounts":
                 account = self.trading.create_account(payload)
                 self._register_account_with_admin(account)  # 本地+远程开户都经此,登记到 Admin
+                events.publish({"type": "account_created", "account_id": account["id"], "owner": account.get("owner")})
                 self._json({"account": account}, HTTPStatus.CREATED)
                 return
             if path == "/api/admin-link":
@@ -309,6 +344,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/delete").strip("/"))
                 result = self.trading.delete_account(account_id, payload)
                 self._deregister_account_with_admin(account_id)  # 通知 Admin 注销该账户
+                events.publish({"type": "account_deleted", "account_id": account_id})
                 self._json(result, HTTPStatus.CREATED)
                 return
             if path.startswith("/api/accounts/") and path.endswith("/update"):
@@ -609,6 +645,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "watchlist": True,
                 "audit_chain": True,
                 "trade_backfill": True,
+                "admin_link": True,
+                "event_stream": True,
                 "export": ["csv", "json"],
             },
             # agent 发现用的主端点目录(按域分组);详细参数见 skill/README。
@@ -629,6 +667,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "quotes": "GET /api/quotes",
                 "audit_chain": "GET /api/audit/chain/{event_id}",
                 "connectors_health": "GET /api/data/connectors/health",
+                "event_stream": "GET /api/stream (SSE; 远程需 X-Admin-Token=node.token)",
             },
         }
 

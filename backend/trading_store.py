@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend import app_settings
+from backend import events
 from backend import friction
 from backend import names as security_names
 from backend import repo
@@ -1268,6 +1269,12 @@ class TradingStore:
                     (account_id, sleeve_id, symbol, position_after, avg_cost_after, fill_price, timestamp),
                 )
 
+        if fill_quantity > 0:
+            events.publish({
+                "type": "trade_filled", "account_id": account_id, "sleeve_id": sleeve_id,
+                "symbol": symbol, "side": side, "quantity": fill_quantity, "price": fill_price,
+                "timestamp": str(timestamp),
+            })
         return {
             "accepted": True,
             "source_event_id": source_event_id,
@@ -1464,6 +1471,11 @@ class TradingStore:
                     (account_id, sleeve_id, symbol, position_after, avg_cost_after, price, timestamp),
                 )
 
+        events.publish({
+            "type": "trade_filled", "account_id": account_id, "sleeve_id": sleeve_id,
+            "symbol": symbol, "side": side, "quantity": quantity, "price": price,
+            "timestamp": str(timestamp), "backfill": True,
+        })
         return {
             "accepted": True,
             "backfill": True,

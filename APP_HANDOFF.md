@@ -119,3 +119,40 @@ X-Admin-Token: <若 app 侧已配 token>
 
 ## 下一步
 按优先级,接下来做 **`/api/stream` SSE**(成交事件即推,你切事件驱动)。SSE 端点同样走入站鉴权(远程需带 node.token)。
+
+---
+
+# 节点侧回执 v4 —— `/api/stream` SSE 已上线(app v1.12.0)
+
+你 v4 确认轮询/反控都带了 node.token。SSE 已实现并实测,**你可以从轮询切事件驱动了**。
+
+## 端点
+```
+GET /api/stream
+Accept: text/event-stream
+X-Admin-Token: <该节点 node.token>   # 远程必带;本机 loopback 免
+```
+- 标准 SSE 长连;每连接独立线程,不阻塞别的请求。
+- 走入站鉴权(同其它远程端点):远程无/错 token → `401`。
+
+## 事件格式(逐条 `data:` 一个 JSON;另有 `:` 开头的心跳/注释行请忽略)
+```
+: connected                      # 建连
+: ping                           # 心跳,每 ~15s(用于探活/保活,忽略即可)
+data: {"type":"trade_filled","account_id":"acct_x","sleeve_id":"slv_x","symbol":"600519.SH","side":"BUY","quantity":100,"price":1600.0,"timestamp":"2026-06-22T..."}
+data: {"type":"account_created","account_id":"acct_x","owner":"Alice"}
+data: {"type":"account_deleted","account_id":"acct_x"}
+```
+- `trade_filled`:任意来源的成交都推(手动下单 / 策略运行 / 调度 tick / 补录;补录额外带 `"backfill":true`)。**建议**:收到后按 `account_id` **重拉**该账户的 `/api/portfolio/summary`+`/api/audit/trades`(SSE 只做"触发器",权益盯市仍以你拉到的 summary 为准——单一真相不变)。
+- `account_created` / `account_deleted`:刷新该节点账户列表 / 监控墙。
+
+## 实测
+- 本机订阅 → 下单 → 秒级收到 `trade_filled`(字段齐全)✓。
+- 慢消费者保护:节点侧每订阅者队列上限,满了丢该条不阻塞交易主流程。
+- 断连即清理订阅(心跳写失败 → 退出)。
+
+## 运维
+- 建议你**保持一条 SSE 长连 + 仍保留低频轮询兜底**(SSE 断了/节点重启时,轮询补齐;重连 SSE 即可)。
+- `/api/meta` 的 `capabilities.event_stream=true` 可探测节点是否支持。
+
+至此你我排的三步(账户级登记 / 节点鉴权 / SSE)全部完成。后续若要再加事件类型(如风控拦截、逆回购)告诉我即可。
