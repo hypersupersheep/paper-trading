@@ -156,3 +156,22 @@ data: {"type":"account_deleted","account_id":"acct_x"}
 - `/api/meta` 的 `capabilities.event_stream=true` 可探测节点是否支持。
 
 至此你我排的三步(账户级登记 / 节点鉴权 / SSE)全部完成。后续若要再加事件类型(如风控拦截、逆回购)告诉我即可。
+
+---
+
+# 节点侧回执 v5 —— 新增两类事件(app v1.12.1)
+
+收到你 v5(SSE 已切事件驱动 + 轮询兜底;`/api/events/stream`→`/api/stream` 已修)。按你点名的,SSE 已**新增两类事件**(都走同一条流,格式同前):
+
+```
+data: {"type":"order_rejected","account_id":"acct_x","sleeve_id":"slv_x","symbol":"600519.SH","side":"SELL","quantity":500,"reason":"...","timestamp":"..."}
+data: {"type":"reverse_repo","account_id":"acct_x","trade_date":"2026-06-23","invest_amount":300000,"annual_rate":0.018,"interest":14.79,"rate_source":"custom","source":"manual"}
+```
+- **`order_rejected`**:任意拦截统一一处推(风控 / 择时 / 现金不足 / 持仓不足 / 时序 / 价格哨兵…),带 `reason`。你可在墙上闪一下"该账户有单被拦"。
+- **`reverse_repo`**:手动买入(`source:"manual"`,带 trade_date/金额/年化/利息)或自愈批量补全(`source:"auto"`,带 `filled`/`interest`)时推。
+
+照旧:这俩也只是**触发器**,收到后按 `account_id` 重拉 summary/trades 即可(单一真相不变)。实测两类都秒级到达。`/api/meta` 的 `capabilities.event_stream` 仍为探测位。
+
+**优化采纳**:认同你「各节点都支持 SSE 后 `POLL_INTERVAL` 调到 15–30s 省流量」——实时性交给 SSE、轮询只兜底。这是你侧参数,我无需改动;节点侧 SSE 已稳定支撑。
+
+事件类型如还要加(成交撤单、调度 tick、风控配置变更等)随时说。

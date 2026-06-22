@@ -99,7 +99,7 @@ POST /api/accounts/{id}/delete         删除账户(有持仓需 {"force":true};
 POST /api/accounts/{id}/update         更新账户配置(name/owner/commission_rate/stamp_duty_rate/slippage_model/slippage_value/reverse_repo_annual_rate;**initial_cash 不可改**;只对之后成交生效)
 GET|POST /api/admin-link               Admin 对接配置(admin_url/admin_token/node_name/base_url;opt-in,配了才登记;token 不回明文)
 POST /api/admin-link/register-all      把本机现有全部账户登记到 Admin(Admin 上线后补登)
-GET  /api/stream                       SSE 事件流(成交即推 trade_filled / account_created / account_deleted;远程需 X-Admin-Token=node.token,本机免)
+GET  /api/stream                       SSE 事件流(trade_filled / order_rejected / reverse_repo / account_created / account_deleted;远程需 X-Admin-Token=node.token,本机免)
 # 账户带 owner(交易员)字段;配了 admin_url 后,开户/改配置自动 POST register(单条),删账户自动 POST 注销,启动批量补登(accounts:[]);幂等 best-effort 不影响本地
 POST /api/accounts/{id}/sleeves        资金单元
 POST /api/broker/orders                下单

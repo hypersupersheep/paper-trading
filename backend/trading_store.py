@@ -1551,6 +1551,11 @@ class TradingStore:
                 "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
                 (round(interest - prev_interest, 2), account_id),
             )
+        events.publish({
+            "type": "reverse_repo", "account_id": account_id, "trade_date": trade_date,
+            "invest_amount": amount, "annual_rate": annual_rate, "interest": interest,
+            "rate_source": rate_source, "source": str(payload.get("source") or "manual"),
+        })
         return {"trade_date": trade_date, "timestamp": timestamp, "invest_amount": amount,
                 "annual_rate": annual_rate, "interest": interest, "rate_source": rate_source,
                 "repo_symbol": repo_symbol, "term_days": term, "replaced": prev_interest > 0}
@@ -1673,6 +1678,11 @@ class TradingStore:
                     "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
                     (round(new_interest, 2), account_id),
                 )
+        if inserted or new_interest:
+            events.publish({
+                "type": "reverse_repo", "account_id": account_id, "source": "auto",
+                "filled": inserted, "interest": round(new_interest, 2),
+            })
         return {
             "filled": inserted,
             "total": len(schedule),
@@ -1829,6 +1839,12 @@ class TradingStore:
                 ("rejected", reason, timestamp, order_id),
             )
 
+        # 推送拒单事件(风控/择时/现金/持仓/时序等各种拦截统一在此一处)。
+        events.publish({
+            "type": "order_rejected", "account_id": account_id, "sleeve_id": sleeve_id,
+            "symbol": symbol, "side": side, "quantity": quantity, "reason": reason,
+            "timestamp": str(timestamp),
+        })
         return self.audit_store.record_event(
             AuditEvent(
                 timestamp=timestamp,
