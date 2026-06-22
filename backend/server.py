@@ -56,6 +56,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = {key: values[-1] for key, values in parse_qs(parsed.query).items()}
+        if not self._guard_remote():
+            return
 
         try:
             if path == "/api/health":
@@ -224,9 +226,21 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - keeps local server usable during prototype work.
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _guard_remote(self) -> bool:
+        """节点入站鉴权:本机放行;远程须带 X-Admin-Token=node_token。未过则 401。"""
+        if admin_link.authorize(self.client_address[0], self.headers.get("X-Admin-Token")):
+            return True
+        self._json(
+            {"error": "unauthorized: remote access requires X-Admin-Token (node admin-token)"},
+            HTTPStatus.UNAUTHORIZED,
+        )
+        return False
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if not self._guard_remote():
+            return
         try:
             payload = self._read_json()
             if path == "/api/accounts":

@@ -153,3 +153,27 @@ Admin 已读 `/api/meta` 的 `api_version` 做兼容判断;破坏性变更你 +1
 
 ## Admin 侧接下来(不阻塞你)
 账户级监控墙:轮询节点 summary 后按**已登记**账户拆分,账户成卡、按 `owner` 分组排名;反向开户成功后我这边也会顺带登记(与你的主动登记幂等,不冲突)。
+
+---
+
+# 对接回执 v3 —— 账户级联调通过 + 监控墙上线(Admin 侧)
+
+收到你 v1.10.1 回执。**端到端联调已通过**(打的是你真实 app,非 mock):
+- 开户 → 单条登记 ✓
+- 删账户 → 注销(`/api/admin/accounts/{node}/{acct}/delete`,空 body)✓
+- 重启 → 批量补登(`accounts:[]`)✓
+- node_id 跨重启稳定、与注销路径一致 ✓
+
+Admin 侧账户级监控墙已上线:按已登记账户成卡(按 owner 分组排序、显示所属节点)、按账户收益率排行、下钻按 account_id 过滤持仓/成交、账户级 sparkline。账户实时指标从你节点 `/api/portfolio/summary` 的 `accounts[]` 里按 id 取(单一真相,不双写)。
+
+## 对你这边:无新增契约要求,现有 v1.10.1 已完整对接
+
+## 下一步(沿用你我排的优先级)
+1. **节点 admin-token 鉴权(高,你说下一轮做)** —— 做完把生成的 token 作为登记报文里的 `node.token` 传上来;我反控你(远程开户)时会带 `X-Admin-Token = node.token`,Admin 侧 control 代理已支持,你那边校验即可。
+2. **`/api/stream` SSE(中)** —— 接上后我从轮询切事件驱动、成交秒级上墙。
+3. 自注册(低,可省,register 报文已带 base_url)。
+
+## 一个提醒(不阻塞)
+监控墙要显示实时盈亏,需节点数据源可用。你节点默认 `tongdaxin` 要行情网络;联调时我用 `fixture` 才出数。生产没问题;若某节点数据源不通,我这边可对该节点单独指定 data_source 兜底。
+
+握手:`/api/meta`,api_version=1。有进展我会继续更新本文件。

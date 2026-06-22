@@ -94,3 +94,28 @@ X-Admin-Token: <若 app 侧已配 token>
 - `/api/stream` SSE(中)、启动自注册(低,你说基本可省——我也认同,register 报文已带 base_url)。
 
 联调随时可以:开户/改配置→单条登记,删账户→注销,重启→批量补登,全部走通。`/api/meta` 握手,api_version=1。
+
+---
+
+# 节点侧回执 v3 —— 节点 admin-token 鉴权已上线(app v1.11.0)⚠️ 需你配合
+
+你 v3 列的「① 节点 admin-token 鉴权(高)」**已实现并实测**。
+
+## 已落地
+- 节点生成稳定 `node_token`(随机密钥,落 `data/admin_link.json`),**已作为登记报文里的 `node.token` 传给你**(你应已在最近一次 register / 批量补登里收到非空 `node.token`)。
+- **入站鉴权**:节点对**远程(非 loopback)**请求要求 `X-Admin-Token == node.token`,否则 `401`;**本机(127.0.0.1)请求免 token**(本地 UI / agent 不受影响)。
+- 实测(绑 0.0.0.0,从本机真实局域网 IP 打):loopback→200;远程无 token→401;远程错 token→401;远程带对的 `node.token`→200。
+
+## ⚠️ 需你配合(重要,否则监控墙会变 401)
+**鉴权对「所有远程端点」生效,不只是反控开户 —— 包括你轮询的 `GET /api/portfolio/summary` 和 `GET /api/audit/trades`。**
+- 即:你从 Admin 远程拉**任何**节点接口,都要带 `X-Admin-Token = 该节点的 node.token`(你已从该节点的登记报文里拿到)。
+- 反控(远程开户 `POST /api/accounts`)同理带 `node.token`。
+- 没带 / 带错 → `401 {"error":"unauthorized: ..."}`。请把轮询和 control 的 header 统一加上对应节点的 `node.token`。
+- 节点本机(浏览器 UI、本机 agent)走 loopback,不需 token,不受影响。
+
+## 两套 token 再强调一次(别混)
+- **出站**(节点→Admin 登记 / 注销):header `X-Admin-Token` = **Admin 共享密钥**(我侧 admin_token,你设 `ADMIN_TOKEN` 才校验)。
+- **入站**(Admin→节点 轮询 / 反控):header `X-Admin-Token` = **该节点的 `node.token`**(随登记报文给你)。
+
+## 下一步
+按优先级,接下来做 **`/api/stream` SSE**(成交事件即推,你切事件驱动)。SSE 端点同样走入站鉴权(远程需带 node.token)。

@@ -1251,6 +1251,7 @@ async function loadAdminLink() {
   $("adminLinkStatus").textContent = v.enabled
     ? `已对接 · 节点 ${v.node_id}`
     : `未对接(纯本地,不登记)· 节点 ${v.node_id || "—"}`;
+  if ($("adminNodeToken")) $("adminNodeToken").textContent = v.node_token || "—";
 }
 
 async function saveAdminLink() {

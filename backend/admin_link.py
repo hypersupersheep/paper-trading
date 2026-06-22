@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 import time
 import urllib.request
@@ -16,7 +17,10 @@ from typing import Any
 from backend import paths
 from backend.version import API_VERSION
 
-_FIELDS = ("admin_url", "admin_token", "node_id", "node_name", "base_url")
+_FIELDS = ("admin_url", "admin_token", "node_id", "node_token", "node_name", "base_url")
+# 节点反控 token(Admin 远程拉/控本节点时带 X-Admin-Token=node_token);与出站的 admin_token(共享密钥)是两套。
+
+_LOOPBACK = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
 
 
 def _path():
@@ -41,6 +45,7 @@ def save(updates: dict[str, Any]) -> dict[str, Any]:
             if value or key in {"admin_url"}:
                 data[key] = value
     data["node_id"] = data.get("node_id") or _new_node_id()
+    data["node_token"] = data.get("node_token") or secrets.token_urlsafe(24)
     try:
         _path().parent.mkdir(parents=True, exist_ok=True)
         _path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -60,6 +65,31 @@ def node_id() -> str:
 def _new_node_id() -> str:
     host = "".join(c for c in socket.gethostname().split(".")[0] if c.isalnum() or c in "-_")[:24] or "node"
     return f"{host}-{uuid.uuid4().hex[:6]}"
+
+
+def node_token() -> str:
+    """节点反控 token(稳定,自动生成并落盘)。放进登记报文 node.token,Admin 反控时凭它。"""
+    data = load()
+    if data.get("node_token"):
+        return data["node_token"]
+    return save({})["node_token"]
+
+
+def is_loopback(client_ip: Any) -> bool:
+    ip = str(client_ip or "")
+    return ip in _LOOPBACK or ip.startswith("127.")
+
+
+def authorize(client_ip: Any, header_token: Any) -> bool:
+    """节点入站鉴权:本机(loopback)放行;远程必须带正确 X-Admin-Token = node_token。
+
+    默认 HOST=127.0.0.1 时根本到不了远程分支;只有绑 0.0.0.0/局域网共享时,远程请求才需鉴权
+    ——堵住「同网段裸奔」。本地浏览器 UI / agent SDK 走 loopback,不受影响。
+    """
+    if is_loopback(client_ip):
+        return True
+    token = node_token()
+    return bool(token) and str(header_token or "") == token
 
 
 def is_enabled() -> bool:
@@ -83,7 +113,8 @@ def node_descriptor(port: int) -> dict[str, Any]:
     cfg = load()
     base = cfg.get("base_url") or f"http://{lan_ip()}:{port}"
     name = cfg.get("node_name") or socket.gethostname().split(".")[0] or "node"
-    return {"id": node_id(), "name": name, "base_url": base, "token": "", "api_version": API_VERSION}
+    # node.token = 节点反控 token,Admin 反控时带 X-Admin-Token=它。
+    return {"id": node_id(), "name": name, "base_url": base, "token": node_token(), "api_version": API_VERSION}
 
 
 def account_segment(account: dict[str, Any]) -> dict[str, Any]:
@@ -138,6 +169,7 @@ def public_view() -> dict[str, Any]:
     return {
         "admin_url": data.get("admin_url", ""),
         "node_id": node_id(),
+        "node_token": node_token(),  # 节点反控 token,展示给本机 owner(可对 Admin 核对)
         "node_name": data.get("node_name", ""),
         "base_url": data.get("base_url", ""),
         "has_token": bool(data.get("admin_token")),
