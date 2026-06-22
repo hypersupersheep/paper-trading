@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
-import socket
 import threading
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -295,7 +293,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 return
             if path.startswith("/api/accounts/") and path.endswith("/delete"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/delete").strip("/"))
-                self._json(self.trading.delete_account(account_id, payload), HTTPStatus.CREATED)
+                result = self.trading.delete_account(account_id, payload)
+                self._deregister_account_with_admin(account_id)  # 通知 Admin 注销该账户
+                self._json(result, HTTPStatus.CREATED)
                 return
             if path.startswith("/api/accounts/") and path.endswith("/update"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/update").strip("/"))
@@ -395,66 +395,35 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             pass
 
     # ———————————————— Admin 账户级登记(opt-in) ————————————————
-    def _node_descriptor(self) -> dict[str, Any]:
-        cfg = admin_link.load()
+    def _server_port(self) -> int:
         try:
-            port = self.server.server_address[1]
+            return self.server.server_address[1]
         except Exception:  # noqa: BLE001
-            port = int(os.environ.get("PORT") or 8000)
-        base_url = cfg.get("base_url") or f"http://{admin_link.lan_ip()}:{port}"
-        return {
-            "id": admin_link.node_id(),
-            "name": cfg.get("node_name") or socket.gethostname().split(".")[0],
-            "base_url": base_url,
-            "token": "",  # 节点 admin-token 在 node_patch 落地后填;暂空
-            "api_version": API_VERSION,
-        }
+            return int(os.environ.get("PORT") or 8000)
 
     def _register_account_with_admin(self, account: dict[str, Any]) -> None:
-        """开户/改配置成功后,把账户身份登记到 Admin(§3.1)。未配置 Admin 则跳过。
+        """开户/改配置成功后,把账户身份登记到 Admin(§3.1 单条)。未配置则跳过。
 
-        best-effort:后台线程发,Admin 不可达也绝不影响本地开户。幂等键 (node.id, account.id)。
+        best-effort 后台线程,Admin 不可达绝不影响本地开户。幂等键 (node.id, account.id)。
         """
-        cfg = admin_link.load()
-        if not cfg.get("admin_url"):
+        if not admin_link.is_enabled():
             return
-        payload = {
-            "node": self._node_descriptor(),
-            "account": {
-                "id": account["id"],
-                "owner": account.get("owner") or account.get("name"),
-                "name": account.get("name"),
-                "currency": account.get("currency", "CNY"),
-                "market": account.get("market", "CN_A"),
-                "initial_cash": account.get("initial_cash"),
-            },
-        }
-        threading.Thread(
-            target=self._post_admin,
-            args=(cfg, "/api/admin/accounts/register", payload),
-            daemon=True,
-        ).start()
+        payload = {"node": admin_link.node_descriptor(self._server_port()), "account": admin_link.account_segment(account)}
+        threading.Thread(target=admin_link.post, args=("/api/admin/accounts/register", payload), daemon=True).start()
 
-    @staticmethod
-    def _post_admin(cfg: dict[str, Any], path: str, payload: dict[str, Any]) -> None:
-        try:
-            url = str(cfg["admin_url"]).rstrip("/") + path
-            data = json.dumps(payload).encode("utf-8")
-            headers = {"Content-Type": "application/json"}
-            if cfg.get("admin_token"):
-                headers["X-Admin-Token"] = cfg["admin_token"]
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            urllib.request.urlopen(req, timeout=5).read()
-        except Exception:  # noqa: BLE001 - 登记失败不影响本地;Admin 上线后可手动「登记全部」补
-            pass
+    def _deregister_account_with_admin(self, account_id: str) -> None:
+        """删账户成功后通知 Admin 注销(§3.3),立即从监控墙移除,不残留「最后已知」。"""
+        if not admin_link.is_enabled():
+            return
+        threading.Thread(target=admin_link.post, args=(admin_link.deregister_path(account_id), {}), daemon=True).start()
 
     def _register_all_accounts(self) -> dict[str, Any]:
-        """把本节点现有全部账户登记到 Admin(Admin 上线后一次性补登)。"""
+        """把本节点现有全部账户一次性批量登记(Admin 倾向:同一 register 端点的 accounts:[])。"""
         if not admin_link.is_enabled():
             return {"registered": 0, "error": "未配置 Admin 地址"}
         accounts = self.trading.list_accounts()
-        for account in accounts:
-            self._register_account_with_admin(account)
+        port = self._server_port()
+        threading.Thread(target=admin_link.register_node_accounts, args=(port, accounts), daemon=True).start()
         return {"registered": len(accounts), "node_id": admin_link.node_id()}
 
     def _refresh_industries(self, data_source: Any, symbols: list[str]) -> None:
@@ -1155,6 +1124,15 @@ def run() -> None:
     print(f"{APP_NAME} v{__version__} (api v{API_VERSION})")
     print(f"  数据目录: {paths.home()}")
     print(f"  运行于:   http://{host}:{port}")
+    # 配了 Admin 地址则启动补登一次(Admin 重启/重置 DB 也能自愈),不可达时重试几轮。best-effort。
+    if admin_link.is_enabled():
+        accounts = AuditRequestHandler.trading.list_accounts()
+        threading.Thread(
+            target=admin_link.register_node_accounts,
+            args=(port, accounts),
+            kwargs={"retries": 5, "delay": 4.0},
+            daemon=True,
+        ).start()
     server.serve_forever()
 
 

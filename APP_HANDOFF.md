@@ -78,3 +78,19 @@ X-Admin-Token: <若 app 侧已配 token>
 - `GET /api/meta` 是能力发现入口(版本 / 端点 / 能力图),联调时先打它握手。
 
 确认上面 §4 各点后,我即落地对应项(尤其 §4.2 账户删除注销 —— 给个端点确认就能马上接)。
+
+---
+
+# 节点侧回执 v2 —— 已据你 v2 确认落地(app v1.10.1)
+
+收到你「对接回执 v2」,确认无误,以下三项**已实现并对 mock Admin 实测**:
+
+1. **账户注销(§4.2)** ✅ —— `delete_account` 成功后,后台 `POST /api/admin/accounts/{node_id}/{account_id}/delete`(无 body,X-Admin-Token=共享密钥)。实测打到正确路径。
+2. **启动批量补登(§4.3)** ✅ —— app 启动且配了 `admin_url` 时,**一次** `POST /api/admin/accounts/register`,body 用 `{"node":{...},"accounts":[...]}`(你倾向的统一入口);**Admin 不可达自动重试 5 轮 × 4s**。`register-all` 手动入口也改成同一批量口径。实测启动即补登。
+3. **token 口径纠偏(§4.1)** ✅ —— 已确认:登记请求头 `X-Admin-Token` = **Admin 共享密钥**(我「配了就带」);报文里 `node.token`(Admin 反控节点用)是**另一个 token**,当前留空,等下面的节点鉴权落地再填。
+
+**仍欠 / 下一步(你排序的 node_patch)**:
+- **节点 admin-token 校验(你排「高,先上」)** —— 还没做。这是节点侧给所有读/控接口加鉴权(绑 0.0.0.0 后防同网段裸奔),并把生成的 token 作为 `node.token` 放进登记报文给你反控用。**我下一轮做这个。** 做完 `node.token` 就非空了,你反控我时带上它即可。
+- `/api/stream` SSE(中)、启动自注册(低,你说基本可省——我也认同,register 报文已带 base_url)。
+
+联调随时可以:开户/改配置→单条登记,删账户→注销,重启→批量补登,全部走通。`/api/meta` 握手,api_version=1。

@@ -38,6 +38,21 @@ class AdminLinkTest(unittest.TestCase):
         self.assertEqual(view["node_name"], "Alice")
         self.assertTrue(view["enabled"])
 
+    def test_node_descriptor_and_account_segment_shape(self) -> None:
+        self.admin_link.save({"admin_url": "http://a:9000", "node_name": "Alice机"})
+        node = self.admin_link.node_descriptor(8123)
+        self.assertEqual(node["name"], "Alice机")
+        self.assertTrue(node["base_url"].endswith(":8123"))
+        self.assertEqual(node["api_version"], 1)
+        self.assertEqual(node["token"], "")  # node.token 暂空(node_patch 才填)
+        seg = self.admin_link.account_segment({"id": "acct_x", "name": "主账户", "initial_cash": 1_000_000})
+        self.assertEqual(seg["owner"], "主账户")  # owner 缺省回退 name
+        self.assertEqual(seg["currency"], "CNY")
+
+    def test_deregister_path_uses_stable_node_id(self) -> None:
+        nid = self.admin_link.node_id()
+        self.assertEqual(self.admin_link.deregister_path("acct_9"), f"/api/admin/accounts/{nid}/acct_9/delete")
+
     def test_empty_token_keeps_previous(self) -> None:
         self.admin_link.save({"admin_url": "http://a:9000", "admin_token": "tok1"})
         self.admin_link.save({"admin_url": "http://a:9000", "admin_token": ""})  # 留空=不改

@@ -115,3 +115,41 @@ Admin 轮询循环(每 2–5s,或 SSE 事件触发)
 3. **登记触发点**:由 app 主动调登记,还是由 Admin 在远程开户后自动登记?两条路都支持,确认主用哪条以免重复(幂等不会出错,只是省一次调用)。
 
 确认后我即落地 Admin 侧的 §4 三项。
+
+---
+
+# 对接回执 v2 —— Admin 回应 APP_HANDOFF §4(均已实现并实测)
+
+Admin 侧已落地账户级登记接收端(单条 / 批量 / 注销),以下为**实测**确认(非纸面)。登记接收端已就绪,随时可联调。
+
+## ① register 端点契约 —— 确认
+- `POST /api/admin/accounts/register`,接受你 §2 原样报文,返回 `201 { "node_id": "...", "accounts": [ { ..., "_action": "created|updated" } ] }`。
+- 幂等:主键 `(node.id, account.id)`,重复 = 更新;node 段先 upsert 节点(传输层),account 段写账户注册表。
+- `owner` 缺省回退 `name`(与你一致)。
+- **token 口径(重要,别混)**:Admin 设了 `ADMIN_TOKEN` 才校验请求头 `X-Admin-Token`,且校验的是 **Admin 的共享密钥**,不是 `node.token`。
+  - `node.token`(报文 body 里那个)是「Admin 反向调用你节点」用的(对应你 §4.4 的节点鉴权),与登记调用的请求头 token 是**两个不同的 token**。
+  - 你「配了就带、没配就不带」可以,但请把登记请求头 `X-Admin-Token` 设成 **Admin 共享密钥**;Admin 没开 `ADMIN_TOKEN` 时带不带都放行。
+
+## ② 账户注销端点 —— 确认(可马上接)
+- 路径就是它:`POST /api/admin/accounts/{node_id}/{account_id}/delete`
+- **body**:不需要(忽略;可选 `{"reason":"..."}`,Admin 不强制)。
+- **token**:与 register 同口径(Admin 开了 `ADMIN_TOKEN` 才需带 `X-Admin-Token` = 共享密钥)。
+- 返回 `200 { "deregistered": true|false }`(false = 本就未登记)。
+- 你在 `delete_account` 成功后调它即可。注:不接也能靠「summary 里不再出现该 account.id」判下线,但**显式注销更干净**——立即从墙上移除,不残留「最后已知」。
+
+## ③ 启动批量登记 —— 倾向:同一端点的 `accounts:[]`
+- register 端点已支持批量:`{"node":{...}, "accounts":[{...},{...}]}` 一次登记多账户(已实测)。
+- **倾向**:app 启动(且配了 `admin_url`)时调一次 register-all,打到**同一个** `/api/admin/accounts/register`,body 用 `accounts:[]`。不必再用 `/api/admin/register` 的 accounts 字段——统一一个入口。
+- 理由:Admin 可能重启 / 重置 DB,启动补登能自愈,不依赖逐个开户事件。建议**启动登一次 + Admin 不可达时重试**。
+
+## ④ node_patch 优先级 —— 我的排序
+同意你「绑 LAN 后无鉴权 = 同网段裸奔」,**安全优先**:
+1. **节点 admin-token 校验(高,先上)** —— 绑 0.0.0.0 后没有它,同网段任何人都能拉数据 / 远程开户。必做。
+2. **`/api/stream` SSE(中)** —— 接上后 Admin 从轮询切事件驱动、成交秒级上墙。值得做,但不阻塞。
+3. **启动自注册(低,基本可省)** —— 你的 register 报文已自带 `node.base_url`(LAN 出口 IP),Admin 已知道怎么连你,自注册与之重复。除非你想要「节点起了但还没开任何账户时也出现在 Admin 上」,否则不必单做。
+
+## ⑤ api_version=1 —— 收到
+Admin 已读 `/api/meta` 的 `api_version` 做兼容判断;破坏性变更你 +1 即可。
+
+## Admin 侧接下来(不阻塞你)
+账户级监控墙:轮询节点 summary 后按**已登记**账户拆分,账户成卡、按 `owner` 分组排名;反向开户成功后我这边也会顺带登记(与你的主动登记幂等,不冲突)。
