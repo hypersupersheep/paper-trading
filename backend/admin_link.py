@@ -103,16 +103,63 @@ def bind_host(env_host: str | None = None) -> str:
     return "0.0.0.0" if is_enabled() else "127.0.0.1"
 
 
-def lan_ip() -> str:
-    """本机在局域网里的 IP(不真正发包,只问内核选哪个出口)。失败回环兜底。"""
+def _ip_rank(ip: str) -> int:
+    """局域网地址优先级(越小越优):物理家用/办公网段优先,容器/VPN/链路本地段靠后。
+
+    背景:装了 Docker/Parallels/Tailscale 的机器,默认路由出口常是虚拟网卡(如 Docker 桥
+    172.x),登记的 base_url 外部不可达 → Admin 连不上。这里按网段挑物理局域网地址。
+    """
+    parts = ip.split(".")
+    if ip.startswith("192.168."):
+        return 0
+    if ip.startswith("10."):
+        return 1
+    if ip.startswith("127."):
+        return 9  # 回环,最次
+    if ip.startswith("169.254."):
+        return 8  # 链路本地(没拿到 DHCP)
+    if len(parts) == 4 and parts[0] == "172" and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+        return 8  # 172.16/12:Docker 默认桥等容器段
+    if len(parts) == 4 and parts[0] == "100" and parts[1].isdigit() and 64 <= int(parts[1]) <= 127:
+        return 8  # 100.64/10:Tailscale 等 CGNAT
+    return 4  # 其它(罕见物理网段 / 公网)
+
+
+def pick_lan_ip(candidates: set[str]) -> str:
+    """从候选 IP 里挑最像物理局域网的(纯函数,便于单测)。空则回环。"""
+    usable = [ip for ip in candidates if ip and not ip.startswith("0.")]
+    if not usable:
+        return "127.0.0.1"
+    return min(sorted(usable), key=_ip_rank)  # sorted 让同档位结果稳定
+
+
+def _enumerate_ipv4() -> set[str]:
+    """尽量枚举本机所有 IPv4(多源汇总:默认路由出口 + 主机名解析)。跨平台容错。"""
+    ips: set[str] = set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
+        sock.connect(("8.8.8.8", 80))  # Linux 上常给真实出口;Mac 上可能给虚拟网卡
+        ips.add(sock.getsockname()[0])
     except Exception:  # noqa: BLE001
-        return "127.0.0.1"
+        pass
     finally:
         sock.close()
+    host = socket.gethostname()
+    for getter in (
+        lambda: [socket.gethostbyname(host)],
+        lambda: socket.gethostbyname_ex(host)[2],
+        lambda: [r[4][0] for r in socket.getaddrinfo(host, None, socket.AF_INET)],
+    ):
+        try:
+            ips.update(getter())
+        except Exception:  # noqa: BLE001
+            pass
+    return ips
+
+
+def lan_ip() -> str:
+    """本机物理局域网 IP:多源枚举 + 按网段挑选,跳过 Docker/VPN/链路本地。失败回环兜底。"""
+    return pick_lan_ip(_enumerate_ipv4())
 
 
 def node_descriptor(port: int) -> dict[str, Any]:

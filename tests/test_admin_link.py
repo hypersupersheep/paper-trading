@@ -49,6 +49,20 @@ class AdminLinkTest(unittest.TestCase):
         self.assertEqual(seg["owner"], "主账户")  # owner 缺省回退 name
         self.assertEqual(seg["currency"], "CNY")
 
+    def test_pick_lan_ip_prefers_physical_skips_virtual(self) -> None:
+        pick = self.admin_link.pick_lan_ip
+        # Docker 桥 + 真实 WiFi → 选 192.168
+        self.assertEqual(pick({"172.19.0.1", "192.168.0.186", "127.0.0.1"}), "192.168.0.186")
+        # Parallels 10.x + WiFi 192.168 → 仍选 192.168
+        self.assertEqual(pick({"10.211.55.2", "192.168.1.7"}), "192.168.1.7")
+        # 只有真实 10.x 局域网 → 选它
+        self.assertEqual(pick({"10.0.0.5", "127.0.0.1"}), "10.0.0.5")
+        # 只有容器段 + 回环 → 兜底容器段(总比回环强,且留 base_url 手填逃生)
+        self.assertEqual(pick({"172.19.0.1", "127.0.0.1"}), "172.19.0.1")
+        # Tailscale CGNAT vs WiFi → 选 WiFi
+        self.assertEqual(pick({"100.100.1.2", "192.168.0.9"}), "192.168.0.9")
+        self.assertEqual(pick(set()), "127.0.0.1")
+
     def test_bind_host_auto_lan_when_admin_configured(self) -> None:
         self.assertEqual(self.admin_link.bind_host(), "127.0.0.1")  # 纯本地默认只听本机
         self.admin_link.save({"admin_url": "http://boss:9000"})
