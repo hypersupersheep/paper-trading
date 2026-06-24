@@ -1265,7 +1265,11 @@ async function saveAdminLink() {
   await postJson("/api/admin-link", body);
   $("adminToken").value = "";
   await loadAdminLink();
-  showToast("Admin 对接配置已保存");
+  showToast(
+    body.admin_url
+      ? "已保存 · 重启 app 后本机才会绑 0.0.0.0、对老板机可见(远程已 node.token 鉴权)"
+      : "Admin 对接配置已保存"
+  );
 }
 
 async function registerAllAccounts() {

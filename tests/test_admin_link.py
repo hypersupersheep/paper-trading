@@ -49,6 +49,12 @@ class AdminLinkTest(unittest.TestCase):
         self.assertEqual(seg["owner"], "主账户")  # owner 缺省回退 name
         self.assertEqual(seg["currency"], "CNY")
 
+    def test_bind_host_auto_lan_when_admin_configured(self) -> None:
+        self.assertEqual(self.admin_link.bind_host(), "127.0.0.1")  # 纯本地默认只听本机
+        self.admin_link.save({"admin_url": "http://boss:9000"})
+        self.assertEqual(self.admin_link.bind_host(), "0.0.0.0")  # 配了 Admin → 绑局域网
+        self.assertEqual(self.admin_link.bind_host("192.168.1.7"), "192.168.1.7")  # 显式 HOST 最优先
+
     def test_node_token_stable_and_secret(self) -> None:
         t = self.admin_link.node_token()
         self.assertTrue(t and len(t) >= 16)

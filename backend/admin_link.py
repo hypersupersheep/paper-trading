@@ -96,6 +96,13 @@ def is_enabled() -> bool:
     return bool(load().get("admin_url"))
 
 
+def bind_host(env_host: str | None = None) -> str:
+    """监听地址:显式 HOST 优先;否则配了 Admin 就绑 0.0.0.0(老板机可达,远程已 node.token 鉴权),纯本地 127.0.0.1。"""
+    if env_host:
+        return env_host
+    return "0.0.0.0" if is_enabled() else "127.0.0.1"
+
+
 def lan_ip() -> str:
     """本机在局域网里的 IP(不真正发包,只问内核选哪个出口)。失败回环兜底。"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

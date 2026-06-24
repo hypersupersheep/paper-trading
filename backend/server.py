@@ -1171,12 +1171,15 @@ def run() -> None:
                 initial_cash=account["initial_cash"],
             )
     AuditRequestHandler.store.seed_demo()
-    # 监听地址可由 HOST 覆盖(默认 127.0.0.1 只本机;打包/局域网共享时可设 0.0.0.0)。
-    host = os.environ.get("HOST", "127.0.0.1")
+    # 监听地址:显式 HOST 环境变量最优先;否则——配了 Admin(admin_link.is_enabled())就自动绑
+    # 0.0.0.0 让老板机能连上(远程已强制 node.token 鉴权,安全);纯本地未对接则仍只听 127.0.0.1。
+    # 这样同事下载即用,无需手动配 HOST。
+    host = admin_link.bind_host(os.environ.get("HOST"))
     server = ThreadingHTTPServer((host, port), AuditRequestHandler)
     print(f"{APP_NAME} v{__version__} (api v{API_VERSION})")
     print(f"  数据目录: {paths.home()}")
-    print(f"  运行于:   http://{host}:{port}")
+    bind_note = "局域网可达(已对接 Admin,远程需 node.token)" if host == "0.0.0.0" else "仅本机"
+    print(f"  运行于:   http://{host}:{port}  · {bind_note}")
     # 配了 Admin 地址则启动补登一次(Admin 重启/重置 DB 也能自愈),不可达时重试几轮。best-effort。
     if admin_link.is_enabled():
         accounts = AuditRequestHandler.trading.list_accounts()
