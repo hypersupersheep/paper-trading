@@ -140,6 +140,24 @@
         </div>
       </section>
 
+      <section class="panel strategy-desc-panel" data-view="overview">
+        <div class="panel-head compact">
+          <div>
+            <h2>策略描述</h2>
+            <span>手动 / AI 填写 + 上传说明文件(pdf/word/excel/md)· 老板在 Admin 可见</span>
+          </div>
+          <button id="descSave" class="primary" type="button">保存描述</button>
+        </div>
+        <textarea id="descText" rows="4" placeholder="描述这个账户跑的策略:思路、信号、风控、目标…(也可让 AI 写)"></textarea>
+        <div class="desc-files-row">
+          <label class="desc-upload">＋ 上传文件
+            <input id="descFile" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.md,.markdown,.txt,.csv" hidden />
+          </label>
+          <span class="muted">pdf / word / excel / md,单文件 ≤ 25MB</span>
+        </div>
+        <div id="descFiles" class="desc-files"></div>
+      </section>
+
       <section class="perf-view" data-view="performance">
         <div class="perf-metrics" id="perfMetrics"></div>
         <section class="panel" id="perfAttributionPanel" hidden>

@@ -30,6 +30,7 @@ const state = {
   },
   selectedId: null,
   pnlSort: "time",
+  descAccountId: null,
   view: "overview",
 };
 
@@ -1916,9 +1917,75 @@ function renderOrderBook() {
     .join("");
 }
 
+async function loadDescription(accountId) {
+  if (!accountId) return;
+  const d = await fetchJson(`/api/accounts/${encodeURIComponent(accountId)}/description`);
+  state.descAccountId = accountId;
+  $("descText").value = d.description || "";
+  renderDescFiles(accountId, d.files || []);
+}
+
+function renderDescFiles(accountId, files) {
+  const box = $("descFiles");
+  if (!files.length) {
+    box.innerHTML = '<span class="muted">暂无文件</span>';
+    return;
+  }
+  box.innerHTML = files
+    .map(
+      (f) => `<div class="desc-file">
+        <a href="/api/accounts/${encodeURIComponent(accountId)}/files/${f.id}" target="_blank" rel="noopener">${escapeHtml(f.filename)}</a>
+        <span class="muted">${(f.size / 1024).toFixed(0)} KB</span>
+        <button type="button" class="desc-del" data-file="${f.id}">删除</button>
+      </div>`
+    )
+    .join("");
+}
+
+async function saveDescription() {
+  const accountId = state.descAccountId || $("accountFilter").value.trim();
+  if (!accountId) return;
+  await postJson(`/api/accounts/${encodeURIComponent(accountId)}/description`, { description: $("descText").value });
+  showToast("策略描述已保存");
+  await loadPortfolio(); // 让 summary/Admin 拿到新描述
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1]); // 去掉 data: 前缀
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadDescFile(file) {
+  const accountId = state.descAccountId || $("accountFilter").value.trim();
+  if (!accountId || !file) return;
+  if (file.size > 25 * 1024 * 1024) {
+    showToast("文件超过 25MB");
+    return;
+  }
+  const content_base64 = await fileToBase64(file);
+  await postJson(`/api/accounts/${encodeURIComponent(accountId)}/files`, { filename: file.name, content_base64 });
+  showToast(`已上传 ${file.name}`);
+  await loadDescription(accountId);
+}
+
+async function deleteDescFile(fileId) {
+  const accountId = state.descAccountId || $("accountFilter").value.trim();
+  if (!accountId) return;
+  await postJson(`/api/accounts/${encodeURIComponent(accountId)}/files/${fileId}/delete`, {});
+  await loadDescription(accountId);
+}
+
 function renderPortfolio() {
   const account = state.portfolio?.accounts?.[0];
   updateTicker(account);
+  // 账户切换时加载策略描述(不在用户编辑同账户时反复清空)。
+  if (account && account.id !== state.descAccountId) {
+    loadDescription(account.id).catch(() => {});
+  }
   renderBlotter();
   updateTicketEstimate();
   if (!account) {
@@ -2967,6 +3034,16 @@ $("storagePick").addEventListener("click", () => handleStoragePick().catch((erro
 $("storageReset").addEventListener("click", () => resetStorageLocation().catch((error) => showToast(error.message)));
 $("accountForm").addEventListener("submit", (event) => createAccount(event).catch((error) => showToast(error.message)));
 $("accountEditTarget").addEventListener("change", applyAccountEditMode);
+$("descSave").addEventListener("click", () => saveDescription().catch((error) => showToast(error.message)));
+$("descFile").addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  event.target.value = ""; // 允许重复选同名文件
+  uploadDescFile(file).catch((error) => showToast(error.message));
+});
+$("descFiles").addEventListener("click", (event) => {
+  const btn = event.target.closest(".desc-del");
+  if (btn) deleteDescFile(btn.dataset.file).catch((error) => showToast(error.message));
+});
 $("sleeveForm").addEventListener("submit", (event) => createSleeve(event).catch((error) => showToast(error.message)));
 $("orderForm").addEventListener("submit", (event) => submitOrder(event).catch((error) => showToast(error.message)));
 $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event).catch((error) => showToast(error.message)));

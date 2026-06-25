@@ -2562,3 +2562,70 @@ tbody tr:hover .void-btn {
   font-weight: 500;
   color: var(--muted);
 }
+
+/* 策略描述卡 */
+.strategy-desc-panel textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 88px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 13px;
+}
+.desc-files-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.desc-upload {
+  padding: 6px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 100px;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.desc-upload:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.desc-files {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.desc-file {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+.desc-file a {
+  color: var(--accent-strong);
+  text-decoration: none;
+  font-weight: 600;
+}
+.desc-file a:hover {
+  text-decoration: underline;
+}
+.desc-file .desc-del {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+.desc-file .desc-del:hover {
+  color: var(--danger);
+}

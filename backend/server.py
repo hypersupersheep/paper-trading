@@ -177,6 +177,26 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/reverse-repo").strip("/"))
                 self._json(self.trading.list_reverse_repo(account_id))
                 return
+            if path.startswith("/api/accounts/") and path.endswith("/description"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/description").strip("/"))
+                self._json(self.trading.get_description(account_id))
+                return
+            if path.startswith("/api/accounts/") and "/files/" in path:
+                # GET /api/accounts/{id}/files/{file_id} —— 下载文件原始字节(供 Admin 代理/浏览器查看)
+                rest = path.removeprefix("/api/accounts/").strip("/")
+                account_id, _, file_id = rest.partition("/files/")
+                file = self.trading.get_file(unquote(account_id), unquote(file_id))
+                if not file:
+                    self._json({"error": "file not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                from urllib.parse import quote as _q
+                disp = f"inline; filename*=UTF-8''{_q(file['filename'])}"
+                self._send(HTTPStatus.OK, file["content"], file["content_type"], {"Content-Disposition": disp})
+                return
+            if path.startswith("/api/accounts/") and path.endswith("/files"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/files").strip("/"))
+                self._json({"files": self.trading.list_files(account_id)})
+                return
             if path.startswith("/api/accounts/"):
                 account_id = unquote(path.removeprefix("/api/accounts/").strip("/"))
                 account = self.trading.get_account(account_id)
@@ -340,7 +360,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 timing_strategy_id = unquote(path.removeprefix("/api/timing-strategies/").removesuffix("/delete").strip("/"))
                 self._json(self.timing.delete_timing_strategy(timing_strategy_id), HTTPStatus.CREATED)
                 return
-            if path.startswith("/api/accounts/") and path.endswith("/delete"):
+            if path.startswith("/api/accounts/") and path.endswith("/delete") and "/files/" not in path:
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/delete").strip("/"))
                 result = self.trading.delete_account(account_id, payload)
                 self._deregister_account_with_admin(account_id)  # 通知 Admin 注销该账户
@@ -408,6 +428,22 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/accounts/") and path.endswith("/reverse-repo"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/reverse-repo").strip("/"))
                 self._json(self.trading.run_reverse_repo(account_id, payload), HTTPStatus.CREATED)
+                return
+            if path.startswith("/api/accounts/") and path.endswith("/description"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/description").strip("/"))
+                self._json(self.trading.set_description(account_id, payload.get("description", "")), HTTPStatus.CREATED)
+                return
+            if path.startswith("/api/accounts/") and path.endswith("/files"):
+                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/files").strip("/"))
+                import base64
+                content = base64.b64decode(payload.get("content_base64") or "")
+                meta = self.trading.add_file(account_id, payload.get("filename", ""), content)
+                self._json({"file": meta}, HTTPStatus.CREATED)
+                return
+            if path.startswith("/api/accounts/") and "/files/" in path and path.endswith("/delete"):
+                rest = path.removeprefix("/api/accounts/").removesuffix("/delete").strip("/")
+                account_id, _, file_id = rest.partition("/files/")
+                self._json(self.trading.delete_file(unquote(account_id), unquote(file_id)), HTTPStatus.CREATED)
                 return
             if path.startswith("/api/broker/orders/") and path.endswith("/cancel"):
                 order_id = unquote(path.removeprefix("/api/broker/orders/").removesuffix("/cancel").strip("/"))

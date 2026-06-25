@@ -17,6 +17,26 @@ from backend.audit_store import AuditEvent, AuditStore
 from backend.data_connectors import normalize_frequency
 
 
+# 策略描述附件:允许的类型 + 大小上限 + Content-Type 映射。
+_MAX_FILE_BYTES = 25 * 1024 * 1024  # 25MB
+_ALLOWED_FILE_EXT = {"pdf", "doc", "docx", "xls", "xlsx", "md", "markdown", "txt", "csv"}
+_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "md": "text/markdown; charset=utf-8",
+    "markdown": "text/markdown; charset=utf-8",
+    "txt": "text/plain; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
+}
+
+
+def _content_type_for(ext: str) -> str:
+    return _CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
 DEFAULT_ACCOUNT = {
     "id": "acct_a_share_alpha",
     "name": "A-Share Alpha",
@@ -168,6 +188,23 @@ class TradingStore:
             self._ensure_column(conn, "reverse_repo_records", "rate_source", "TEXT NOT NULL DEFAULT 'custom'")
             # 账户加 owner(交易员标识),供 Admin 按人分组/排名;缺省空串,读取时回退到 name。
             self._ensure_column(conn, "accounts", "owner", "TEXT NOT NULL DEFAULT ''")
+            # 账户加 description(策略描述文字,手动/AI 输入);Admin 点开账户可见。
+            self._ensure_column(conn, "accounts", "description", "TEXT NOT NULL DEFAULT ''")
+            # 策略描述附件(pdf/word/excel/md):字节存 BLOB,随数据目录走;Admin 代理下载查看。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_files (
+                    id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    content BLOB NOT NULL,
+                    uploaded_at TEXT NOT NULL,
+                    FOREIGN KEY(account_id) REFERENCES accounts(id)
+                )
+                """
+            )
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -354,6 +391,67 @@ class TradingStore:
             )
         )
         return self.get_account(account_id) or account
+
+    # ———————————————— 策略描述(文字 + 附件)————————————————
+    def set_description(self, account_id: str, description: str) -> dict[str, Any]:
+        if not self.get_account(account_id):
+            raise ValueError(f"unknown account_id: {account_id}")
+        with self._connection() as conn:
+            conn.execute("UPDATE accounts SET description = ? WHERE id = ?", (str(description or ""), account_id))
+        return self.get_description(account_id)
+
+    def get_description(self, account_id: str) -> dict[str, Any]:
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"unknown account_id: {account_id}")
+        return {
+            "account_id": account_id,
+            "description": account.get("description") or "",
+            "files": self.list_files(account_id),
+        }
+
+    def list_files(self, account_id: str) -> list[dict[str, Any]]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT id, filename, content_type, size, uploaded_at FROM account_files "
+                "WHERE account_id = ? ORDER BY uploaded_at ASC",
+                (account_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_file(self, account_id: str, filename: str, content: bytes) -> dict[str, Any]:
+        if not self.get_account(account_id):
+            raise ValueError(f"unknown account_id: {account_id}")
+        filename = str(filename or "").strip() or "未命名"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext not in _ALLOWED_FILE_EXT:
+            raise ValueError(f"不支持的文件类型 .{ext};仅 pdf/word/excel/md/txt/csv")
+        if len(content) > _MAX_FILE_BYTES:
+            raise ValueError(f"文件过大({len(content)} 字节),上限 {_MAX_FILE_BYTES // (1024 * 1024)}MB")
+        file_id = f"file_{uuid.uuid4().hex[:12]}"
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO account_files (id, account_id, filename, content_type, size, content, uploaded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (file_id, account_id, filename, _content_type_for(ext), len(content), content, _now()),
+            )
+        return {"id": file_id, "filename": filename, "content_type": _content_type_for(ext),
+                "size": len(content), "uploaded_at": _now()}
+
+    def get_file(self, account_id: str, file_id: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT filename, content_type, content FROM account_files WHERE id = ? AND account_id = ?",
+                (file_id, account_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {"filename": row["filename"], "content_type": row["content_type"], "content": bytes(row["content"])}
+
+    def delete_file(self, account_id: str, file_id: str) -> dict[str, Any]:
+        with self._connection() as conn:
+            cur = conn.execute("DELETE FROM account_files WHERE id = ? AND account_id = ?", (file_id, account_id))
+        return {"deleted": cur.rowcount > 0, "id": file_id}
 
     def create_sleeve(self, account_id: str, payload: dict[str, Any], *, seed: bool = False) -> dict[str, Any]:
         account = self.get_account(account_id)
@@ -1772,6 +1870,7 @@ class TradingStore:
             "id": account["id"],
             "name": account["name"],
             "owner": account.get("owner") or account["name"],
+            "description": account.get("description") or "",
             "currency": account["currency"],
             "market": account["market"],
             "initial_cash": _money(account["initial_cash"]),

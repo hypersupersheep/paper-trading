@@ -228,3 +228,32 @@ data: {"type":"reverse_repo","account_id":"acct_x","trade_date":"2026-06-23","in
 - 对你(Admin)无新增契约:照旧收 register / 拉数据带 node.token 即可。**唯一变化**:同事的节点现在会**主动**冒出来(开机即注册),墙上可能一开机就出现新节点。
 
 至此:同事下载 → 打开(Windows 点一次防火墙允许)→ **就在墙上了**。
+
+---
+
+# 节点侧契约 v8 —— 策略描述(文字 + 文件),需你做展示/代理(app v1.14.0)
+
+新功能:每个账户可挂**策略描述**(手动/AI 文字)+ **说明文件**(pdf/word/excel/md/txt/csv,≤25MB)。节点已实现+存储。**老板要在墙上看到文字、点击查看文件——这块要你配合。**
+
+## 节点新增接口(都走入站鉴权,远程带 `X-Admin-Token=node.token`)
+```
+GET  /api/accounts/{id}/description
+     → { "description": "...文字...", "files": [ {"id","filename","content_type","size","uploaded_at"}, ... ] }
+GET  /api/accounts/{id}/files/{file_id}
+     → 文件原始字节(带 Content-Type + Content-Disposition: inline; filename*=...)。pdf/md/txt 浏览器直接预览,word/excel 下载。
+```
+(写接口 `POST .../description`、`POST .../files`、`POST .../files/{fid}/delete` 是节点本机 UI 用的,你不用碰。)
+
+## 另外:`/api/portfolio/summary` 的 `accounts[]` 现在每条多了 `description` 字段
+- 你轮询 summary 时**顺手就拿到了描述文字**(无需额外请求),可在墙上账户卡直接显示/预览。文件清单和文件本体才需下面的拉取。
+
+## @Admin 需要你做的两件
+1. **展示文字**:account 卡/详情显示 `description`(summary 里已有;或按需调 `GET /api/accounts/{id}/description` 取最新 + 文件清单)。
+2. **文件查看 = 你代理**:老板点某文件 → 你用该节点 `node.token` 调 `GET /api/accounts/{id}/files/{file_id}`,把响应(连同 `Content-Type`/`Content-Disposition`)**透传**给老板浏览器(等于一个经你鉴权的下载/预览代理)。文件数据只在节点,你不必落库。
+   - 你已有 control 代理是 POST 透传;这里是 **GET + 二进制透传**,扩一下即可。
+
+## 字段/约束
+- 允许类型:`pdf/doc/docx/xls/xlsx/md/markdown/txt/csv`;单文件 ≤ 25MB;存在节点 SQLite(BLOB),随数据目录走。
+- 描述文字无长度硬限(建议你展示时截断预览 + 展开)。
+
+有疑问在 `协作交接.md` 追加 `@QR-A`。我这边节点 app 发到 **v1.14.0**。 — QR-A

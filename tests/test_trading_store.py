@@ -737,6 +737,27 @@ class TradingStoreTest(unittest.TestCase):
         self.assertEqual(row["realized_pnl"], sell["realized_pnl"])
         self.assertEqual(board["total_realized_pnl"], sell["realized_pnl"])
 
+    def test_strategy_description_text_and_files(self) -> None:
+        # 文字
+        self.trading.set_description("acct_test", "双均线择时 + 行业中性")
+        d = self.trading.get_description("acct_test")
+        self.assertEqual(d["description"], "双均线择时 + 行业中性")
+        self.assertEqual(d["files"], [])
+        self.assertEqual(self.trading.get_portfolio_summary("acct_test")["accounts"][0]["description"], "双均线择时 + 行业中性")
+        # 上传文件
+        meta = self.trading.add_file("acct_test", "说明.md", b"# strategy\n20/60 cross")
+        self.assertEqual(meta["content_type"], "text/markdown; charset=utf-8")
+        self.assertEqual(self.trading.get_file("acct_test", meta["id"])["content"], b"# strategy\n20/60 cross")
+        self.assertEqual(len(self.trading.list_files("acct_test")), 1)
+        # 类型/大小校验
+        with self.assertRaises(ValueError):
+            self.trading.add_file("acct_test", "x.exe", b"MZ")
+        with self.assertRaises(ValueError):
+            self.trading.add_file("acct_test", "big.pdf", b"x" * (26 * 1024 * 1024))
+        # 删除
+        self.assertTrue(self.trading.delete_file("acct_test", meta["id"])["deleted"])
+        self.assertEqual(self.trading.list_files("acct_test"), [])
+
     def test_account_owner_defaults_to_name_and_is_editable(self) -> None:
         # 不传 owner → 回退账户名
         a = self.trading.create_account({"id": "acct_o1", "name": "Alice 主账户", "initial_cash": 1_000_000})
