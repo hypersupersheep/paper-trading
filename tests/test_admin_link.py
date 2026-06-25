@@ -20,10 +20,26 @@ class AdminLinkTest(unittest.TestCase):
             os.environ["PAPER_TRADING_HOME"] = self._saved_home
         self.tmp.cleanup()
 
-    def test_disabled_until_admin_url_set(self) -> None:
-        self.assertFalse(self.admin_link.is_enabled())
-        self.admin_link.save({"admin_url": "http://192.168.1.5:9000"})
+    def test_default_admin_url_enabled_until_cleared(self) -> None:
+        # 内置默认 → 新机器开箱即"已对接"(零配置)。
         self.assertTrue(self.admin_link.is_enabled())
+        self.assertEqual(self.admin_link.load()["admin_url"], self.admin_link.DEFAULT_ADMIN_URL)
+        # 改成自定义地址 → 用自定义。
+        self.admin_link.save({"admin_url": "http://192.168.1.5:9000"})
+        self.assertEqual(self.admin_link.load()["admin_url"], "http://192.168.1.5:9000")
+        self.assertTrue(self.admin_link.is_enabled())
+        # 清空 → 显式断开,默认不再回灌。
+        self.admin_link.save({"admin_url": ""})
+        self.assertEqual(self.admin_link.load()["admin_url"], "")
+        self.assertFalse(self.admin_link.is_enabled())
+
+    def test_default_not_persisted_so_it_can_change(self) -> None:
+        # 仅写 node_id/node_token 的 save 不应把默认 admin_url 固化进文件(换老板机时未手配的同事能跟新默认)。
+        self.admin_link.node_id()  # 触发一次 save({})
+        import json
+        raw = json.loads(self.admin_link._path().read_text(encoding="utf-8"))
+        self.assertNotIn("admin_url", raw)  # 文件里没有 admin_url
+        self.assertTrue(self.admin_link.is_enabled())  # 但 load 仍注入默认
 
     def test_node_id_is_stable(self) -> None:
         first = self.admin_link.node_id()
@@ -64,9 +80,9 @@ class AdminLinkTest(unittest.TestCase):
         self.assertEqual(pick(set()), "127.0.0.1")
 
     def test_bind_host_auto_lan_when_admin_configured(self) -> None:
-        self.assertEqual(self.admin_link.bind_host(), "127.0.0.1")  # 纯本地默认只听本机
-        self.admin_link.save({"admin_url": "http://boss:9000"})
-        self.assertEqual(self.admin_link.bind_host(), "0.0.0.0")  # 配了 Admin → 绑局域网
+        self.assertEqual(self.admin_link.bind_host(), "0.0.0.0")  # 默认指向老板机 → 绑局域网
+        self.admin_link.save({"admin_url": ""})  # 清空=纯本地
+        self.assertEqual(self.admin_link.bind_host(), "127.0.0.1")  # 断开后只听本机
         self.assertEqual(self.admin_link.bind_host("192.168.1.7"), "192.168.1.7")  # 显式 HOST 最优先
 
     def test_node_token_stable_and_secret(self) -> None:

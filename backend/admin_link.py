@@ -22,26 +22,40 @@ _FIELDS = ("admin_url", "admin_token", "node_id", "node_token", "node_name", "ba
 
 _LOOPBACK = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
 
+# 内置默认 Admin 地址(老板机):新机器从未配置过时自动用它 → 开机零配置直连上墙。
+# 仅地址(局域网 IP,非敏感)内置;不内置任何共享口令。换老板机:改这里发版(新装的自动跟随;
+# 已手动配过的同事不受影响,需自行改地址)。同事在 UI 可随时改/清空(清空=断开,纯本地)。
+DEFAULT_ADMIN_URL = "http://192.168.0.58:8800"
+
 
 def _path():
     return paths.data_dir() / "admin_link.json"
 
 
-def load() -> dict[str, Any]:
+def _read_raw() -> dict[str, Any]:
     try:
         path = _path()
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (OSError, json.JSONDecodeError):
-        data = {}
-    return {k: data.get(k, "") for k in _FIELDS}
+        return {}
+
+
+def load() -> dict[str, Any]:
+    raw = _read_raw()
+    out = {k: raw.get(k, "") for k in _FIELDS}
+    # 从未设过 admin_url(键不存在)→ 用内置默认;显式存了空串(用户清空过)→ 尊重为断开。
+    if "admin_url" not in raw and DEFAULT_ADMIN_URL:
+        out["admin_url"] = DEFAULT_ADMIN_URL
+    return out
 
 
 def save(updates: dict[str, Any]) -> dict[str, Any]:
-    data = load()
+    # 读原始(不注入默认):避免把内置默认固化进文件——这样将来换老板机改默认时,没手动配过的同事能跟到新默认。
+    data = _read_raw()
     for key in _FIELDS:
         if key in updates and updates[key] is not None:
             value = str(updates[key]).strip()
-            # 空串视为"不改"(token 尤其:前端不回明文,留空即保留原值)。
+            # 空串视为"不改"(token 尤其:前端不回明文,留空即保留原值);admin_url 例外:允许写空串=显式断开。
             if value or key in {"admin_url"}:
                 data[key] = value
     data["node_id"] = data.get("node_id") or _new_node_id()
