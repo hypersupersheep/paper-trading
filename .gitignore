@@ -11,6 +11,7 @@ node_modules/
 dist/
 coverage/
 data/connector_settings.json
+data/admin_link.json
 build/
 dist/
 *.spec.bak
