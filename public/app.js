@@ -77,6 +77,9 @@ function switchView(view) {
   if (view === "backtest" && state.backtest) {
     renderBtChart(state.backtest);
     setTimeout(() => btChartState.chart && btChartState.chart.timeScale().fitContent(), 60);
+  } else if (view === "backtest") {
+    // 还没跑过回测:图表区给行动引导,不留裸空白。
+    setChartEmpty($("btChart"), true, "运行回测后在此显示净值曲线 — 配置左侧参数,点「运行回测」");
   }
   // 回测与模拟盘是分开的:回测页不显示"当前在跑账户"的账户条(选择器+实时指标)。
   const hideAccount = view === "backtest";
@@ -678,10 +681,65 @@ function renderMonthlyHeatmap(curve) {
   el.innerHTML = `<table class="monthly-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
 }
 
+// 图表空态遮罩:无数据时盖一层引导文案(动作指引),替掉裸露的图表水印。
+// 纯表现层——只在图表容器上增删一个覆盖层 div,不碰图表数据/逻辑。
+function setChartEmpty(el, isEmpty, message) {
+  if (!el) return;
+  let ov = el.querySelector(":scope > .chart-empty-overlay");
+  if (isEmpty) {
+    if (!ov) {
+      ov = document.createElement("div");
+      ov.className = "chart-empty-overlay";
+      el.style.position = "relative";
+      el.appendChild(ov);
+    }
+    ov.innerHTML =
+      '<svg class="ceo-icon" width="34" height="20" viewBox="0 0 34 20" fill="none" aria-hidden="true">' +
+      '<path d="M1 15 L9 9 L15 12 L22 4 L33 8" stroke="currentColor" stroke-width="1.6" ' +
+      'stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+      `<div class="ceo-msg">${message}</div>`;
+    ov.style.display = "flex";
+  } else if (ov) {
+    ov.style.display = "none";
+  }
+}
+
+// 借鉴 backtest-chart skill 的 signature:把"最痛那段"(最大回撤的 peak→trough)
+// 标出来。回撤是风险叙事的核心,值得专门指认。找最深回撤的谷点与其之前的峰点。
+function maxDrawdownSpan(curve) {
+  let peakEq = -Infinity;
+  let peakTime = null;
+  let worst = 0;
+  let troughTime = null;
+  let troughPeakTime = null;
+  for (const p of curve) {
+    if (p.equity >= peakEq) {
+      peakEq = p.equity;
+      peakTime = p.time;
+    }
+    const dd = p.drawdown != null ? p.drawdown : peakEq ? p.equity / peakEq - 1 : 0;
+    if (dd < worst) {
+      worst = dd;
+      troughTime = p.time;
+      troughPeakTime = peakTime;
+    }
+  }
+  if (troughTime == null || worst > -0.0001) return null; // 回撤太浅就不标,免得噪声
+  return { worst, troughTime, peakTime: troughPeakTime };
+}
+
+// 复用 app 既有的告警琥珀(--warn #d29922)做"风险注解"色:既是 skill 的暖色重音,
+// 又不与 A股红涨绿跌的 P&L 语义抢色。setMarkers 已有则更新,否则创建。
+function applyMdMarkers(store, key, series, markers) {
+  if (store[key]) store[key].setMarkers(markers);
+  else if (markers.length) store[key] = LightweightCharts.createSeriesMarkers(series, markers);
+}
+
 function renderPerfCharts(data) {
   ensurePerfCharts();
   if (!perfCharts.equity || !data) return;
   const curve = data.curve || [];
+  const hasCurve = curve.length >= 2;
   const base = data.metrics?.initial_cash || curve[0]?.equity || 0;
   perfCharts.equity.base = base;
   perfCharts.equity.series.applyOptions({ baseValue: { type: "price", price: base } });
@@ -691,11 +749,29 @@ function renderPerfCharts(data) {
   perfCharts.equity.bench.setData(benchSeries.map((point) => ({ time: point.time, value: point.value })));
   perfCharts.equity.chart.timeScale().fitContent();
   perfCharts.drawdown.chart.timeScale().fitContent();
+  setChartEmpty($("perfEquityChart"), !hasCurve, "暂无净值曲线 — 运行策略或点「记录快照」后生成");
+  setChartEmpty($("perfDrawdownChart"), !hasCurve, "暂无回撤数据");
+
+  // 标出最大回撤的 peak→trough(借鉴 backtest-chart skill 的风险叙事 signature)
+  const md = hasCurve ? maxDrawdownSpan(curve) : null;
+  const ddPct = md ? (md.worst * 100).toFixed(1) : "";
+  // 只标谷点:峰点常落在价格轴顶端,aboveBar 标记会被裁剪且增噪;
+  // skill 的 signature 本就聚焦"最痛的那一刻"(最大回撤谷点)。
+  // 标签用短文「回撤 X%」:谷点常落在序列末端(亏损策略末端触底),长标签会被右边界裁掉。
+  const eqMarkers = md
+    ? [{ time: md.troughTime, position: "belowBar", color: "#d29922", shape: "arrowDown", text: `回撤 ${ddPct}%` }]
+    : [];
+  const ddMarkers = md
+    ? [{ time: md.troughTime, position: "aboveBar", color: "#d29922", shape: "arrowDown", text: `${ddPct}%` }]
+    : [];
+  applyMdMarkers(perfCharts.equity, "md", perfCharts.equity.series, eqMarkers);
+  applyMdMarkers(perfCharts.drawdown, "md", perfCharts.drawdown.series, ddMarkers);
 
   // 滚动夏普
   const rolling = computeRollingSharpe(curve, 30);
   perfCharts.rolling.series.setData(rolling);
   perfCharts.rolling.chart.timeScale().fitContent();
+  setChartEmpty($("perfRollingChart"), rolling.length === 0, "样本不足 — 需 ≥32 个净值点才能算 30 日滚动夏普");
   $("perfRollingNote").textContent = rolling.length
     ? `共 ${rolling.length} 个滚动点 · 最新 ${rolling[rolling.length - 1].value.toFixed(2)}`
     : "样本不足:需 ≥32 个净值点才能算 30 日滚动夏普";
@@ -859,6 +935,7 @@ function renderBtChart(result) {
   ensureBtChart();
   if (!btChartState.chart || !result) return;
   const curve = result.curve || [];
+  const hasCurve = curve.length >= 2;
   const base = result.summary?.initial_cash || curve[0]?.equity || 0;
   btChartState.base = base;
   btChartState.equity.applyOptions({ baseValue: { type: "price", price: base } });
@@ -867,6 +944,16 @@ function renderBtChart(result) {
   const benchSeries = result.benchmark?.series || [];
   btChartState.bench.setData(benchSeries.map((point) => ({ time: point.time, value: point.value })));
   btChartState.chart.timeScale().fitContent();
+  // 与绩效图一致:空态 + 最大回撤标注。回测图是净值+回撤合一,marker 只标在净值线上即可。
+  setChartEmpty($("btChart"), !hasCurve, "本次回测无净值数据 — 检查区间与数据源是否覆盖");
+  const md = hasCurve ? maxDrawdownSpan(curve) : null;
+  const ddPct = md ? (md.worst * 100).toFixed(1) : "";
+  applyMdMarkers(
+    btChartState,
+    "mdEq",
+    btChartState.equity,
+    md ? [{ time: md.troughTime, position: "belowBar", color: "#d29922", shape: "arrowDown", text: `回撤 ${ddPct}%` }] : [],
+  );
 }
 
 async function loadBacktestRuns() {
@@ -942,7 +1029,7 @@ function renderWatchlist() {
           <span class="wl-sym">${quote.symbol}</span>
           <span class="wl-last">${last}</span>
           <span class="wl-chg ${cls}">${chg}</span>
-          <button type="button" class="wl-remove" data-action="remove" title="移除">×</button>
+          <button type="button" class="wl-remove" data-action="remove" title="移除" aria-label="从自选股移除 ${quote.symbol}">×</button>
         </div>`;
     })
     .join("");
@@ -974,7 +1061,9 @@ async function addWatchlist(event) {
 function setTicketSide(side) {
   $("orderSide").value = side;
   for (const button of document.querySelectorAll(".side-toggle button")) {
-    button.classList.toggle("active", button.dataset.side === side);
+    const on = button.dataset.side === side;
+    button.classList.toggle("active", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
   }
   const submit = $("ticketSubmit");
   submit.classList.toggle("buy", side === "BUY");
@@ -1383,6 +1472,22 @@ function renderBackfillSleeves() {
   if (previous) $("backfillSleeve").value = previous;
 }
 
+// 数值更新闪动(签名微交互):值变化时按 A股红涨绿跌闪一下,呼应实时成交流。
+// 纯表现层——只比较前后数值、加/去 CSS class,不碰任何数据或下单逻辑。
+// 首次渲染不闪;用双 requestAnimationFrame 重触发动画(避免同步布局读取)。
+function flashValue(el, value, text) {
+  if (!el) return;
+  const prevRaw = el.dataset.prevVal;
+  el.textContent = text;
+  el.dataset.prevVal = Number.isFinite(value) ? String(value) : "";
+  if (prevRaw === undefined || prevRaw === "") return;
+  const prev = Number(prevRaw);
+  if (!Number.isFinite(prev) || !Number.isFinite(value) || value === prev) return;
+  const dir = value > prev ? "flash-up" : "flash-down"; // 涨=红, 跌=绿
+  el.classList.remove("flash-up", "flash-down");
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add(dir)));
+}
+
 function updateTicker(account) {
   // 左下侧边栏"当前账户"跟随选中账户(此前写死 A-Share Alpha)。
   $("sidebarAccountName").textContent = account?.name || "--";
@@ -1396,21 +1501,26 @@ function updateTicker(account) {
     }
     return;
   }
-  $("tickerEquity").textContent = `¥${formatNumber(account.equity)}`;
+  flashValue($("tickerEquity"), account.equity, `¥${formatNumber(account.equity)}`);
   // 当日盈亏:需数据源盯市才有(account.day_pnl);无数据源标记时显示 --。
   const dayPnl = account.day_pnl;
   if (dayPnl === null || dayPnl === undefined) {
     $("tickerDayPnl").textContent = "--";
     $("tickerDayPnl").className = "ticker-muted";
+    $("tickerDayPnl").dataset.prevVal = "";
   } else {
-    $("tickerDayPnl").textContent = formatSigned(dayPnl);
     $("tickerDayPnl").className = numberClass(dayPnl);
+    flashValue($("tickerDayPnl"), dayPnl, formatSigned(dayPnl));
   }
-  $("tickerPnl").textContent = `${account.pnl >= 0 ? "+" : ""}${formatNumber(account.pnl)} (${formatPercent(account.pnl_pct)})`;
   $("tickerPnl").className = numberClass(account.pnl);
-  $("tickerCash").textContent = `¥${formatNumber(account.total_cash)}`;
-  $("tickerMv").textContent = `¥${formatNumber(account.market_value)}`;
-  $("tickerExposure").textContent = formatPercent(account.exposure);
+  flashValue(
+    $("tickerPnl"),
+    account.pnl,
+    `${account.pnl >= 0 ? "+" : ""}${formatNumber(account.pnl)} (${formatPercent(account.pnl_pct)})`
+  );
+  flashValue($("tickerCash"), account.total_cash, `¥${formatNumber(account.total_cash)}`);
+  flashValue($("tickerMv"), account.market_value, `¥${formatNumber(account.market_value)}`);
+  flashValue($("tickerExposure"), account.exposure, formatPercent(account.exposure));
 }
 
 function renderRiskSleeves() {
@@ -2776,7 +2886,10 @@ $("pnlSort").addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-sort]");
   if (!btn) return;
   state.pnlSort = btn.dataset.sort;
-  for (const b of $("pnlSort").querySelectorAll("button")) b.classList.toggle("active", b === btn);
+  for (const b of $("pnlSort").querySelectorAll("button")) {
+    b.classList.toggle("active", b === btn);
+    b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+  }
   renderPnlBoard();
 });
 $("resetFilters").addEventListener("click", resetFilters);

@@ -44,6 +44,24 @@
   --mono: "SF Mono", "JetBrains Mono", "Roboto Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
   --sans: "PingFang SC", "Microsoft YaHei", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+
+  /* 间距尺度(8px 基准):统一面板内距、栅格间隔,消除散填 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  /* 字号尺度:micro=eyebrow 标签 · data=数据值 · hero=主数值 */
+  --fs-micro: 11px;
+  --fs-label: 12px;
+  --fs-body: 13px;
+  --fs-h2: 14px;
+  --fs-data: 19px;
+  --fs-hero: 24px;
+
+  /* eyebrow 字间距:小标签拉开一点,机构终端的精度感 */
+  --tracking-eyebrow: 0.6px;
 }
 
 * {
@@ -53,6 +71,23 @@
 html,
 body {
   margin: 0;
+}
+
+/* 声明暗色主题:让原生滚动条、表单控件、下拉菜单跟随暗色(尤其 Windows) */
+html {
+  color-scheme: dark;
+}
+
+/* 尊重系统"减少动态效果":前庭功能障碍/晕动症用户关闭过渡与动画 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 body {
@@ -269,7 +304,22 @@ nav button.active {
   font-size: 16px;
   color: var(--text-strong);
   letter-spacing: -0.2px;
+  border-radius: 3px;
 }
+
+/* 数值更新闪动(签名微交互):值变化时背景柔和 tint 一下再淡出,呼应实时成交流。
+   只动 background-color,不改盒尺寸 → 零布局抖动。A股红涨绿跌。
+   prefers-reduced-motion 已在顶部全局兜底(动画时长压到 0.01ms,等于关闭)。 */
+@keyframes flash-up {
+  from { background-color: var(--gain-soft); }
+  to { background-color: transparent; }
+}
+@keyframes flash-down {
+  from { background-color: var(--loss-soft); }
+  to { background-color: transparent; }
+}
+.flash-up { animation: flash-up 0.7s ease-out; }
+.flash-down { animation: flash-down 0.7s ease-out; }
 
 .topbar-actions {
   display: flex;
@@ -295,6 +345,15 @@ button:hover {
 
 button:active {
   transform: translateY(1px);
+}
+
+/* 键盘焦点环:鼠标点击不显示,Tab 键盘导航才显示(:focus-visible)。
+   覆盖全部 <button>(含 nav / seg / side-toggle / qty / void / wl-remove)与链接。 */
+button:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
 }
 
 button.primary {
@@ -324,6 +383,8 @@ button.danger:hover {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  /* 耳语级立面:顶部 1px 高光让面板"被照亮",极淡投影制造浮起,不改暗色身份 */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .panel-head {
@@ -384,9 +445,9 @@ textarea::placeholder {
   color: var(--muted-soft);
 }
 
-input:focus,
-select:focus,
-textarea:focus {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: none;
   border-color: var(--accent);
   background: #11151d;
@@ -425,8 +486,8 @@ select option {
 .metrics {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 /* 指标卡的样式统一在文件后部"统一指标卡"处定义(概览 + 绩效共用) */
@@ -990,7 +1051,10 @@ select option {
   font-size: 12.5px;
 }
 
-.connector-card div {
+/* 只作用于卡片头部(名称+状态行)。此前写成 .connector-card div 会波及卡内的
+   .wind-config/.connector-config(也是 div),把它们的 grid 布局覆盖成 flex,
+   导致 wind 配置输入挤成一行、按钮被压成竖排。收窄到 :first-child 修复。 */
+.connector-card > div:first-child {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1001,25 +1065,34 @@ select option {
   font-size: 14px;
 }
 
+/* 状态徽章做成 pill(底色+圆角),比纯彩色文字更有机构终端的状态感 */
 .connector-card .status {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 9px;
+  border-radius: 100px;
+  white-space: nowrap;
 }
 
 .connector-card.ok .status {
   color: var(--ok);
+  background: var(--ok-soft);
 }
 
 .connector-card.configured .status {
-  color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
 }
 
 .connector-card.not_configured .status {
   color: var(--muted);
+  background: rgba(125, 133, 144, 0.14);
 }
 
 .connector-card.unavailable .status {
   color: var(--warn);
+  background: var(--warn-soft);
 }
 
 .connector-card span {
@@ -1274,6 +1347,11 @@ tbody td {
 tbody tr {
   cursor: pointer;
   transition: background 0.1s;
+}
+
+/* 斑马纹:极淡,给密集表格行节奏。放在 hover/selected 规则前,让它们仍能覆盖。 */
+tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.018);
 }
 
 tbody tr:hover {
@@ -1546,6 +1624,33 @@ tbody tr.selected {
 
 .perf-chart-sm {
   height: 200px;
+}
+
+/* 图表空态遮罩:无数据时居中引导,替掉裸露的图表水印。不拦截鼠标(pointer-events:none)。 */
+.chart-empty-overlay {
+  position: absolute;
+  inset: 0;
+  /* lightweight-charts 的 canvas 是 z-index:1/2,遮罩须更高才不被盖住 */
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-5);
+  text-align: center;
+  pointer-events: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: radial-gradient(120% 80% at 50% 45%, rgba(14, 17, 23, 0.55), rgba(14, 17, 23, 0));
+}
+.chart-empty-overlay .ceo-icon {
+  color: var(--muted-soft);
+  opacity: 0.7;
+}
+.chart-empty-overlay .ceo-msg {
+  max-width: 260px;
 }
 
 /* --------------------------- 交易工作区 --------------------------- */
@@ -2060,15 +2165,41 @@ tbody tr.selected {
 /* 统一指标卡(概览 + 绩效):紧凑、微弱景深、悬停高亮 */
 .perf-card,
 .metrics div {
+  position: relative;
   background: linear-gradient(180deg, var(--surface), var(--surface-2));
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 14px;
-  transition: border-color 0.12s ease;
+  padding: var(--space-3) var(--space-4);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
 }
 .perf-card:hover,
 .metrics div:hover {
   border-color: #2d3647;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 2px 10px rgba(0, 0, 0, 0.28);
+  transform: translateY(-1px);
+}
+
+/* KPI 顶部语义色条(借鉴 backtest-chart skill 的 KPI 卡片手法):
+   用 :has() 读卡内数值的正负类,只给收益/盈亏类卡片上条(中性指标无类→无条,自带克制)。
+   A股:正=红(--gain) / 负=绿(--loss)。色条圆角对齐卡片顶角。 */
+.perf-card::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-top-left-radius: var(--radius);
+  border-top-right-radius: var(--radius);
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.perf-card:has(strong.positive)::after {
+  background: var(--gain);
+}
+.perf-card:has(strong.negative)::after {
+  background: var(--loss);
 }
 .perf-card span,
 .metrics span {
@@ -2289,7 +2420,7 @@ input:disabled {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  transition: all 0.12s;
+  transition: opacity 0.12s, background 0.12s, color 0.12s, border-color 0.12s;
   opacity: 0;
 }
 tbody tr:hover .void-btn {
@@ -2411,4 +2542,23 @@ tbody tr:hover .void-btn {
   border-radius: var(--radius-sm);
   word-break: break-all;
   user-select: all;
+}
+
+/* =========================================================================
+   Eyebrow 数据标签(置于文件末尾,作为标签排版的最终裁定)
+   全站短数据标签(资金条/指标卡/组合/账户盒)统一字间距+字号+字重+色,
+   机构终端的"标签纪律感"。只管字体属性,布局(display/margin)留在各组件规则。
+   放末尾是为了在源顺序上稳压前面同特异性的组件规则,避免被 0.2px 等旧值覆盖。
+   不用 text-transform:uppercase —— 中文是 no-op,且会把 VaR/CVaR 这类
+   规范混合大小写的量化术语破坏成 VAR/CVAR,对量化受众失准。
+   ========================================================================= */
+.ticker span,
+.metrics span,
+.perf-card span,
+.portfolio-summary span,
+.account-box > span:first-child {
+  letter-spacing: var(--tracking-eyebrow);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  color: var(--muted);
 }

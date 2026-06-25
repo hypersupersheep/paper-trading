@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0e1117" />
     <title>量化模拟盘 · Audit Replay</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -215,7 +216,7 @@
         <form id="backtestForm" class="panel bt-config">
           <div class="panel-head compact">
             <h2>回测配置</h2>
-            <span>选策略 · 区间 · 摩擦 · 基准 → 一键回测</span>
+            <span>无前视:信号取当根收盘,成交取次根开盘</span>
           </div>
           <div class="form-grid bt-grid">
             <label>回测名称<input id="btName" value="我的回测" /></label>
@@ -297,9 +298,9 @@
             <span>Trade Ticket</span>
           </div>
           <div class="ticket-body">
-            <div class="side-toggle">
-              <button type="button" data-side="BUY" class="active buy">买入</button>
-              <button type="button" data-side="SELL" class="sell">卖出</button>
+            <div class="side-toggle" role="group" aria-label="买卖方向">
+              <button type="button" data-side="BUY" class="active buy" aria-pressed="true">买入</button>
+              <button type="button" data-side="SELL" class="sell" aria-pressed="false">卖出</button>
             </div>
             <select id="orderSide" hidden><option>BUY</option><option>SELL</option></select>
             <label>代码<input id="orderSymbol" value="600519.SH" /></label>
@@ -716,7 +717,7 @@ def on_bar(ctx, bar):
         </div>
       </section>
 
-      <div id="toast" class="toast" hidden></div>
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
       <section class="filters" data-view="replay">
         <label>
@@ -774,9 +775,9 @@ def on_bar(ctx, bar):
             <span>已清仓个股的已实现盈亏(平均成本法;仍持仓的归"组合概览")</span>
           </div>
           <div class="pnl-head-right">
-            <div class="seg" id="pnlSort">
-              <button type="button" data-sort="time" class="active">按时间</button>
-              <button type="button" data-sort="pnl">按盈亏</button>
+            <div class="seg" id="pnlSort" role="group" aria-label="盈亏排序方式">
+              <button type="button" data-sort="time" class="active" aria-pressed="true">按时间</button>
+              <button type="button" data-sort="pnl" aria-pressed="false">按盈亏</button>
             </div>
             <strong id="pnlTotal" class="pnl-total">--</strong>
           </div>
