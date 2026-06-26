@@ -101,50 +101,65 @@ def main() -> int:
         _run_server()
         return 0
 
-    # 原生窗口模式
-    try:
-        import webview
-    except ImportError:
-        threading.Thread(target=_run_server, daemon=True).start()
-        if _wait_until_ready(port):
+    # 后台起服务(原生窗口与浏览器都连它)。
+    threading.Thread(target=_run_server, daemon=True).start()
+    ready = _wait_until_ready(port)
+
+    def _browser_fallback(reason: str = "") -> int:
+        """原生窗口不可用时回退系统浏览器,保证 app 一定能用(本身就是网页 UI)。"""
+        if reason:
+            print(f"原生窗口不可用,回退浏览器: {reason}", flush=True)
+        if ready or _wait_until_ready(port):
             webbrowser.open(url)
         threading.Event().wait()  # 保持进程存活(服务在守护线程里)
         return 0
 
-    class _DesktopApi:
-        """注入到前端 window.pywebview.api,提供浏览器做不到的原生能力。"""
+    # 优先原生窗口;任何失败都回退浏览器:
+    #   - 没装 pywebview(ImportError);
+    #   - Windows 上 pywebview 的 .NET(pythonnet/clr)后端起不来 —— 这类异常发生在 webview.start()
+    #     里(import winforms→clr),只 catch ImportError 兜不住,必须 catch 全部异常。
+    try:
+        import webview
+    except Exception as exc:  # noqa: BLE001
+        return _browser_fallback(f"pywebview 不可用({exc})")
 
-        def pick_folder(self):
-            result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
-            if not result:
-                return None
-            return result[0] if isinstance(result, (list, tuple)) else str(result)
+    try:
+        class _DesktopApi:
+            """注入到前端 window.pywebview.api,提供浏览器做不到的原生能力。"""
 
-        def restart(self):
-            import subprocess
+            def pick_folder(self):
+                result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+                if not result:
+                    return None
+                return result[0] if isinstance(result, (list, tuple)) else str(result)
 
-            subprocess.Popen([sys.executable])  # 新实例会读新数据目录指针
-            for win in list(webview.windows):
-                win.destroy()
-            return True
+            def restart(self):
+                import subprocess
 
-    window = webview.create_window(
-        "量化模拟盘 Paper Trading",
-        html=SPLASH_HTML,
-        width=1480,
-        height=940,
-        min_size=(1120, 720),
-        background_color="#0e1117",
-        js_api=_DesktopApi(),
-    )
+                subprocess.Popen([sys.executable])  # 新实例会读新数据目录指针
+                for win in list(webview.windows):
+                    win.destroy()
+                return True
 
-    def _boot() -> None:
-        threading.Thread(target=_run_server, daemon=True).start()
-        if _wait_until_ready(port):
-            window.load_url(url)  # 服务就绪 → 从 splash 切到真界面
+        window = webview.create_window(
+            "量化模拟盘 Paper Trading",
+            url=(url if ready else None),
+            html=(None if ready else SPLASH_HTML),
+            width=1480,
+            height=940,
+            min_size=(1120, 720),
+            background_color="#0e1117",
+            js_api=_DesktopApi(),
+        )
 
-    webview.start(_boot)  # 主线程跑 GUI;窗口关闭后返回 → 进程退出
-    return 0
+        def _boot() -> None:
+            if not ready and _wait_until_ready(port):
+                window.load_url(url)  # 服务慢时:从 splash 切到真界面
+
+        webview.start(_boot)  # 主线程跑 GUI;窗口关闭后返回 → 进程退出。后端起不来会在这里抛
+        return 0
+    except Exception as exc:  # noqa: BLE001 - 原生窗口后端起不来(如 Windows .NET)→ 回退浏览器
+        return _browser_fallback(str(exc))
 
 
 if __name__ == "__main__":
