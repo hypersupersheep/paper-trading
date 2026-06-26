@@ -30,7 +30,12 @@ else
 fi
 
 echo "==> 打包 zip: dist/${ZIP}"
-( cd dist && rm -f "$ZIP" && zip -r -q "$ZIP" "$TARGET" )
+# .app 必须用 ditto:bundle 里有数百个符号链接,普通 zip 会破坏,解压出来双击"无法打开"。
+if [ "$TARGET" = "PaperTrading.app" ]; then
+  ( cd dist && rm -f "$ZIP" && ditto -c -k --keepParent "$TARGET" "$ZIP" )
+else
+  ( cd dist && rm -f "$ZIP" && zip -r -q "$ZIP" "$TARGET" )
+fi
 
 echo ""
 echo "完成 ✅"

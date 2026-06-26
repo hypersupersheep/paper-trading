@@ -40,12 +40,23 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --clean paper_trading.spec
 
-      # dist/ 里:macOS 会同时有 PaperTrading/ 和 PaperTrading.app;Windows 是 PaperTrading\PaperTrading.exe
+      # macOS:必须用 ditto 打包 .app —— bundle 里有数百个符号链接,普通/跨平台 zip 会破坏它们,
+      # 解压出来就是坏 bundle、双击"无法打开"。ditto 保留 symlink/权限/资源叉/签名,在原生 mac runner 上做。
+      - name: Package macOS (.app via ditto)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/PaperTrading.app "${{ matrix.artifact }}.zip"
+
+      # Windows:.exe 目录无符号链接,原生 Compress-Archive 打包即可。
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/PaperTrading -DestinationPath "${{ matrix.artifact }}.zip"
+
+      # 上传"已打好的 zip"本身(release 阶段只重命名+发布,不再在 Linux 上重压 → 不会再破坏 .app)。
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: dist
+          path: ${{ matrix.artifact }}.zip
           if-no-files-found: error
 
   # 仅在打 v* 标签时跑:把两平台产物打成 zip,发布到 Releases 页(同事可免登录下载)。
@@ -61,21 +72,22 @@ jobs:
         with:
           path: artifacts
 
-      - name: Zip each platform
+      # 产物已是各原生 runner 打好的 zip(mac 用 ditto)。这里只重命名带上版本号,绝不重压(避免再破坏 .app)。
+      - name: Collect + version-name zips
         run: |
-          cd artifacts
-          for d in */; do
-            name="${d%/}"
-            (cd "$d" && zip -qr "../${name}-${GITHUB_REF_NAME}.zip" .)
+          mkdir -p out
+          for z in artifacts/*/*.zip; do
+            base=$(basename "$z" .zip)
+            cp "$z" "out/${base}-${GITHUB_REF_NAME}.zip"
           done
-          ls -la *.zip
+          ls -la out
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            artifacts/*.zip \
+            out/*.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes "自动构建:量化模拟盘桌面包(macOS .app + Windows .exe)。下载对应平台 zip,解压双击即用;数据各自存本机。"
