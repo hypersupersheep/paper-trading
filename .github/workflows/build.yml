@@ -33,6 +33,12 @@ jobs:
       - name: Install build deps
         run: python -m pip install --upgrade pip pywebview pyinstaller mootdx pandas numpy pymysql
 
+      # Windows 原生窗口靠 pywebview 的 winforms 后端 = pythonnet/.NET。显式装,确保打进包(否则
+      # 运行期 clr 加载失败、回退浏览器)。mac 不需要(走 Cocoa)。
+      - name: Install pythonnet (Windows native window)
+        if: runner.os == 'Windows'
+        run: python -m pip install --upgrade pythonnet
+
       - name: Install ricequant client (best-effort)
         shell: bash
         run: python -m pip install rqdatac || echo "rqdatac 在此 runner 安装失败,本平台的包将不含米筐(其余数据源不受影响)"
