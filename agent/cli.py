@@ -158,7 +158,7 @@ def cmd_delete_account(args, pt):
     if args.json:
         return data
     r = data.get("removed", {})
-    return f"已删除账户 {data['id']}（清理 {r.get('sleeves', 0)} 个 sleeve、{r.get('positions', 0)} 个持仓）"
+    return f"已删除账户 {data['id']}（清理 {r.get('positions', 0)} 个持仓）"
 
 
 def cmd_backfill(args, pt):
@@ -169,7 +169,6 @@ def cmd_backfill(args, pt):
         args.quantity,
         args.price,
         args.date,
-        sleeve_id=args.sleeve_id,
         trade_time=args.time,
         apply_fees=not args.no_fees,
         note=args.note,
@@ -180,7 +179,7 @@ def cmd_backfill(args, pt):
     return (
         f"已补录 {data['side']} {data['symbol']} {data['quantity']}@{data['price']}  "
         f"日期 {data['timestamp'][:10]}\n"
-        f"  持仓 -> {data['position_after']} · sleeve 现金 -> {data['cash_after']:,.2f} · "
+        f"  持仓 -> {data['position_after']} · 账户现金 -> {data['cash_after']:,.2f} · "
         f"佣金 {costs.get('commission', 0):.2f} 印花税 {costs.get('stamp_duty', 0):.2f}"
     )
 
@@ -250,14 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--backtest-id", required=True)
     p.set_defaults(func=cmd_review)
 
-    p = sub.add_parser("delete-account", help="删除不用的账户(及其 sleeve/持仓/订单)")
+    p = sub.add_parser("delete-account", help="删除不用的账户(及其持仓/订单)")
     p.add_argument("--account-id", required=True)
     p.add_argument("--force", action="store_true", help="账户仍有持仓时强制删除")
     p.set_defaults(func=cmd_delete_account)
 
     p = sub.add_parser("backfill", help="交易历史补充:补录此前未记录的历史成交(只补历史,勿造正常交易)")
     p.add_argument("--account-id", required=True)
-    p.add_argument("--sleeve-id", help="可省略;不传则用账户默认 sleeve(没有就自动建主仓)")
     p.add_argument("--symbol", required=True, help="如 600519.SH")
     p.add_argument("--side", required=True, choices=["BUY", "SELL", "buy", "sell"])
     p.add_argument("--quantity", type=int, required=True)

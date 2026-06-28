@@ -38,7 +38,7 @@
       <header class="topbar">
         <div class="topbar-left">
           <h1 id="viewTitle">组合概览</h1>
-          <p id="viewSubtitle">账户净值、sleeve 表现与持仓一览</p>
+          <p id="viewSubtitle">账户净值与持仓一览</p>
         </div>
         <div class="topbar-right">
           <div class="account-switch">
@@ -129,10 +129,6 @@
           </div>
         </div>
         <div class="portfolio-detail-grid">
-          <div>
-            <h3>Sleeves</h3>
-            <div id="portfolioSleeves" class="portfolio-list"></div>
-          </div>
           <div>
             <h3>Positions</h3>
             <div id="portfolioPositions" class="portfolio-list"></div>
@@ -323,10 +319,7 @@
             <select id="orderSide" hidden><option>BUY</option><option>SELL</option></select>
             <label>代码<input id="orderSymbol" value="600519.SH" /></label>
             <div class="ticket-last" id="ticketLast">现价 --</div>
-            <div class="ticket-row">
-              <label>账户<select id="orderAccount"></select></label>
-              <label>Sleeve<select id="orderSleeve"></select></label>
-            </div>
+            <label>账户<select id="orderAccount"></select></label>
             <div class="ticket-row">
               <label>价格类型<select id="orderPriceType"><option value="market">市价</option><option value="limit">限价</option></select></label>
               <label>价格<input id="orderSignalPrice" type="number" step="0.01" placeholder="市价单无需填" disabled /></label>
@@ -354,7 +347,7 @@
             <table class="blotter">
               <thead>
                 <tr>
-                  <th>代码</th><th>策略</th><th>数量</th><th>成本价</th><th>现价</th>
+                  <th>代码</th><th>数量</th><th>成本价</th><th>现价</th>
                   <th>市值</th><th>浮动盈亏</th><th>波动率</th><th>操作</th>
                 </tr>
               </thead>
@@ -393,20 +386,6 @@
           <div id="deleteAccountMsg" class="backfill-msg"></div>
         </form>
 
-        <form id="sleeveForm" class="panel ops-panel">
-          <div class="panel-head compact">
-            <h2>策略资金单元</h2>
-            <span>Sleeve</span>
-          </div>
-          <div class="form-grid">
-            <label>账户<select id="sleeveAccount"></select></label>
-            <label>Sleeve 名称<input id="newSleeveName" value="Manual Strategy Sleeve" /></label>
-            <label>Strategy ID<input id="newSleeveStrategy" value="strategy_manual_5m" /></label>
-            <label>分配资金<input id="newSleeveCash" type="number" value="1000000" /></label>
-          </div>
-          <button class="primary" type="submit">创建 Sleeve</button>
-        </form>
-
         <form id="repoForm" class="panel ops-panel">
           <div class="panel-head compact">
             <h2>国债逆回购</h2>
@@ -440,7 +419,6 @@
           <p class="backfill-warn">仅用于补录此前未记录的真实历史成交。绕过择时/风控门控但保持账本一致;正常模拟交易请用上方交易下单,勿用此功能造交易。代码、价格、数量、日期必填。</p>
           <div class="form-grid">
             <label>账户<select id="backfillAccount"></select></label>
-            <label>Sleeve<select id="backfillSleeve"></select></label>
             <label>方向<select id="backfillSide"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
             <label>代码<input id="backfillSymbol" placeholder="如 600519.SH" /></label>
             <label>成交价<input id="backfillPrice" type="number" step="0.01" placeholder="真实成交价" /></label>
@@ -463,9 +441,8 @@
           </div>
           <div class="form-grid">
             <label>账户<select id="riskAccount"></select></label>
-            <label>Sleeve<select id="riskSleeve"></select></label>
             <label>单笔最大金额<input id="riskMaxOrderNotional" type="number" min="0" placeholder="留空不限" /></label>
-            <label>最大敞口比例<input id="riskMaxSleeveExposure" type="number" min="0" step="0.01" placeholder="如 0.8" /></label>
+            <label>最大敞口比例<input id="riskMaxExposure" type="number" min="0" step="0.01" placeholder="如 0.8" /></label>
             <label>单标的最大持仓<input id="riskMaxSymbolPosition" type="number" min="0" step="100" placeholder="股数" /></label>
             <label>最小现金缓冲<input id="riskMinCashBuffer" type="number" min="0" placeholder="留空不限" /></label>
             <label>每 Tick 最大订单<input id="riskMaxOrdersPerTick" type="number" min="0" placeholder="留空不限" /></label>
@@ -478,7 +455,7 @@
         <div class="panel risk-status">
           <div class="panel-head compact">
             <h2>风控规则</h2>
-            <span>sleeve 配置覆盖 account 配置</span>
+            <span>账户级 pre-trade 风控</span>
           </div>
           <div id="riskConfigs" class="risk-list"></div>
         </div>
@@ -531,7 +508,6 @@ def on_bar(ctx, bar):
           <div class="form-grid runner-grid">
             <label>策略<select id="strategySelect"></select></label>
             <label>账户<select id="strategyRunAccount"></select></label>
-            <label>Sleeve<select id="strategyRunSleeve"></select></label>
             <label>数据源<select id="strategyDataSource"></select></label>
             <label>Symbols<input id="strategySymbols" value="000001.SZ" /></label>
             <label>频率<select id="strategyFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
@@ -584,7 +560,6 @@ def on_bar(ctx, bar):
               <label>择时策略<select id="timingBindStrategy"></select></label>
               <label>控制选股策略<select id="timingBindStockStrategy"></select></label>
               <label>账户<select id="timingBindAccount"></select></label>
-              <label>Sleeve<select id="timingBindSleeve"></select></label>
             </div>
             <button class="primary" type="submit">绑定 Gate</button>
             <div id="timingBindings" class="binding-list"></div>
@@ -599,7 +574,6 @@ def on_bar(ctx, bar):
               <label>择时策略<select id="timingRunStrategy"></select></label>
               <label>控制策略<select id="timingRunControlledStrategy"></select></label>
               <label>账户<select id="timingRunAccount"></select></label>
-              <label>Sleeve<select id="timingRunSleeve"></select></label>
               <label>数据源<select id="timingRunDataSource"></select></label>
               <label>Symbols<input id="timingRunSymbols" value="000001.SZ" /></label>
               <label>频率<select id="timingRunFrequency"><option>5m</option><option>1m</option><option>1d</option></select></label>
@@ -620,7 +594,6 @@ def on_bar(ctx, bar):
           <div class="form-grid scheduler-grid">
             <label>任务名<input id="schedulerName" value="Demo 5m Live Loop" /></label>
             <label>账户<select id="schedulerAccount"></select></label>
-            <label>Sleeve<select id="schedulerSleeve"></select></label>
             <label>选股策略<select id="schedulerStrategy"></select></label>
             <label>择时策略<select id="schedulerTiming"></select></label>
             <label>数据源<select id="schedulerDataSource"></select></label>

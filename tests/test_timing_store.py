@@ -20,15 +20,6 @@ class TimingStoreTest(unittest.TestCase):
         self.timing = TimingStore(self.db_path, self.audit, self.trading, root / "timing")
         self.strategy_store = StrategyStore(self.db_path, self.audit, self.trading, root / "strategies", self.timing)
         self.trading.create_account({"id": "acct_timing", "name": "Timing Account", "initial_cash": 1_000_000})
-        self.trading.create_sleeve(
-            "acct_timing",
-            {
-                "id": "sleeve_timing",
-                "name": "Timing Sleeve",
-                "strategy_id": "strategy_timed",
-                "allocated_cash": 500_000,
-            },
-        )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -55,7 +46,6 @@ def on_bar(ctx, bar):
             timing_strategy["id"],
             {
                 "account_id": "acct_timing",
-                "sleeve_id": "sleeve_timing",
                 "strategy_id": "strategy_timed",
                 "symbols": "000001.SZ",
                 "frequency": "5m",
@@ -80,14 +70,12 @@ def on_bar(ctx, bar):
             {
                 "strategy_id": stock_strategy["id"],
                 "account_id": "acct_timing",
-                "sleeve_id": "sleeve_timing",
             },
         )
         self.timing.run_timing_strategy(
             timing_strategy["id"],
             {
                 "account_id": "acct_timing",
-                "sleeve_id": "sleeve_timing",
                 "strategy_id": stock_strategy["id"],
                 "symbols": "000001.SZ",
                 "frequency": "5m",
@@ -99,7 +87,6 @@ def on_bar(ctx, bar):
             stock_strategy["id"],
             {
                 "account_id": "acct_timing",
-                "sleeve_id": "sleeve_timing",
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,
@@ -107,7 +94,7 @@ def on_bar(ctx, bar):
         )
 
         self.assertEqual(result["status"], "completed_with_rejections")
-        self.assertEqual(self.trading.list_positions("sleeve_timing"), [])
+        self.assertEqual(self.trading.list_positions("acct_timing"), [])
         chain = self.audit.get_chain(result["source_event_ids"][0])
         self.assertEqual(chain["timing_decision"]["event_type"], "timing_blocked")
         self.assertIsNotNone(chain["timing_decision"]["metadata"]["timing_decision_id"])
@@ -123,7 +110,6 @@ def on_bar(ctx, bar):
             {
                 "strategy_id": bound_strategy["id"],
                 "account_id": "acct_timing",
-                "sleeve_id": "sleeve_timing",
             },
         )
 
@@ -131,7 +117,6 @@ def on_bar(ctx, bar):
             free_strategy["id"],
             {
                 "account_id": "acct_timing",
-                "sleeve_id": "sleeve_timing",
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,
@@ -140,7 +125,7 @@ def on_bar(ctx, bar):
 
         self.assertEqual(result["status"], "completed")
         self.assertGreater(result["orders_submitted"], 0)
-        positions = self.trading.list_positions("sleeve_timing")
+        positions = self.trading.list_positions("acct_timing")
         self.assertEqual(positions[0]["symbol"], "000001.SZ")
 
     def _create_risk_off_timing_strategy(self) -> dict:

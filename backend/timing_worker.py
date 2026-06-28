@@ -14,13 +14,11 @@ POSITION_POLICIES = {"hold", "reduce_only", "close_all", "target_exposure"}
 class TimingContext:
     def __init__(self, payload: dict[str, Any]):
         self.account_id = payload["account_id"]
-        self.sleeve_id = payload.get("sleeve_id")
         self.timing_strategy_id = payload["timing_strategy_id"]
         self.run_id = payload["run_id"]
         self.frequency = payload["frequency"]
         self.account = payload["account"]
-        self.sleeve = payload.get("sleeve") or {}
-        self.positions = {item["symbol"]: item for item in self.sleeve.get("positions", [])}
+        self.positions = {item["symbol"]: item for item in payload.get("positions", [])}
         self._bars = payload["bars"]
         self._index = 0
         self._decisions: list[dict[str, Any]] = []

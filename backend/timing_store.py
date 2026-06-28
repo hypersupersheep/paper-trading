@@ -127,13 +127,13 @@ class TimingStore:
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_timing_bindings_lookup
-                ON timing_strategy_bindings (strategy_id, account_id, sleeve_id, active)
+                ON timing_strategy_bindings (strategy_id, account_id, active)
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_timing_decisions_latest
-                ON timing_decisions (timing_strategy_id, account_id, sleeve_id, strategy_id, timestamp)
+                ON timing_decisions (timing_strategy_id, account_id, strategy_id, timestamp)
                 """
             )
 
@@ -227,7 +227,7 @@ class TimingStore:
         filters = filters or {}
         clauses: list[str] = []
         params: list[Any] = []
-        for field in ("timing_strategy_id", "strategy_id", "account_id", "sleeve_id"):
+        for field in ("timing_strategy_id", "strategy_id", "account_id"):
             value = filters.get(field)
             if value:
                 clauses.append(f"{field} = ?")
@@ -244,7 +244,7 @@ class TimingStore:
         filters = filters or {}
         clauses: list[str] = []
         params: list[Any] = []
-        for field in ("timing_strategy_id", "strategy_id", "account_id", "sleeve_id", "run_id", "symbol"):
+        for field in ("timing_strategy_id", "strategy_id", "account_id", "run_id", "symbol"):
             value = filters.get(field)
             if value:
                 clauses.append(f"{field} = ?")
@@ -264,13 +264,8 @@ class TimingStore:
             raise ValueError(f"unknown timing_strategy_id: {timing_strategy_id}")
         strategy_id = _required(payload, "strategy_id")
         account_id = _required(payload, "account_id")
-        sleeve_id = payload.get("sleeve_id") or None
         if not self.trading_store.get_account(account_id):
             raise ValueError(f"unknown account_id: {account_id}")
-        if sleeve_id:
-            sleeve = self.trading_store.get_sleeve(sleeve_id)
-            if not sleeve or sleeve["account_id"] != account_id:
-                raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
 
         now = _now()
         active = 1 if payload.get("active", True) else 0
@@ -279,9 +274,8 @@ class TimingStore:
                 """
                 SELECT id FROM timing_strategy_bindings
                 WHERE timing_strategy_id = ? AND strategy_id = ? AND account_id = ?
-                  AND COALESCE(sleeve_id, '') = COALESCE(?, '')
                 """,
-                (timing_strategy_id, strategy_id, account_id, sleeve_id),
+                (timing_strategy_id, strategy_id, account_id),
             ).fetchone()
             if existing:
                 binding_id = existing["id"]
@@ -299,11 +293,11 @@ class TimingStore:
                     """
                     INSERT INTO timing_strategy_bindings (
                         id, timing_strategy_id, strategy_id, account_id,
-                        sleeve_id, active, created_at, updated_at
+                        active, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (binding_id, timing_strategy_id, strategy_id, account_id, sleeve_id, active, now, now),
+                    (binding_id, timing_strategy_id, strategy_id, account_id, active, now, now),
                 )
 
         self.audit_store.record_event(
@@ -312,7 +306,6 @@ class TimingStore:
                 ledger_type="system",
                 event_type="timing_strategy_bound",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=timing_strategy_id,
                 reason="timing strategy bound to stock-picking strategy",
                 metadata={"binding_id": binding_id, "controlled_strategy_id": strategy_id, "active": bool(active)},
@@ -333,12 +326,6 @@ class TimingStore:
         account = self.trading_store.get_account(account_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        sleeve_id = payload.get("sleeve_id") or None
-        sleeve = None
-        if sleeve_id:
-            sleeve = self.trading_store.get_sleeve(str(sleeve_id))
-            if not sleeve or sleeve["account_id"] != account_id:
-                raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
 
         symbols = payload.get("symbols") or ["000001.SZ"]
         if isinstance(symbols, str):
@@ -361,7 +348,6 @@ class TimingStore:
             run_id=run_id,
             timing_strategy_id=timing_strategy_id,
             account_id=account_id,
-            sleeve_id=sleeve_id,
             strategy_id=controlled_strategy_id,
             frequency=frequency,
             mode=f"{data_source}_timing_replay",
@@ -378,7 +364,6 @@ class TimingStore:
                 ledger_type="system",
                 event_type="timing_strategy_run_started",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=timing_strategy_id,
                 run_id=run_id,
                 reason="timing strategy subprocess started",
@@ -386,7 +371,7 @@ class TimingStore:
             )
         )
 
-        worker_result = self._run_worker(timing_strategy, account, sleeve, bars, frequency, run_id)
+        worker_result = self._run_worker(timing_strategy, account, bars, frequency, run_id)
         if not worker_result["ok"]:
             self._finish_run(run_id, "failed", len(bars), 0, worker_result.get("error"))
             self.audit_store.record_event(
@@ -395,7 +380,6 @@ class TimingStore:
                     ledger_type="system",
                     event_type="timing_strategy_run_failed",
                     account_id=account_id,
-                    sleeve_id=sleeve_id,
                     strategy_id=timing_strategy_id,
                     run_id=run_id,
                     reason=worker_result.get("error"),
@@ -414,7 +398,6 @@ class TimingStore:
                         ledger_type="system",
                         event_type="timing_log",
                         account_id=account_id,
-                        sleeve_id=sleeve_id,
                         strategy_id=timing_strategy_id,
                         run_id=run_id,
                         reason=decision.get("message"),
@@ -425,7 +408,6 @@ class TimingStore:
             recorded = self._record_decision(
                 timing_strategy_id=timing_strategy_id,
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=controlled_strategy_id,
                 run_id=run_id,
                 decision=decision,
@@ -440,7 +422,6 @@ class TimingStore:
                 ledger_type="system",
                 event_type="timing_strategy_run_completed",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=timing_strategy_id,
                 run_id=run_id,
                 reason="completed",
@@ -456,17 +437,16 @@ class TimingStore:
             "latest_decision": decisions[-1] if decisions else None,
         }
 
-    def resolve_gate(self, account_id: str, sleeve_id: str, strategy_id: str) -> dict[str, Any] | None:
+    def resolve_gate(self, account_id: str, strategy_id: str) -> dict[str, Any] | None:
         with self._connection() as conn:
             binding = conn.execute(
                 """
                 SELECT * FROM timing_strategy_bindings
                 WHERE active = 1 AND strategy_id = ? AND account_id = ?
-                  AND (sleeve_id IS NULL OR sleeve_id = ?)
-                ORDER BY CASE WHEN sleeve_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                ORDER BY updated_at DESC
                 LIMIT 1
                 """,
-                (strategy_id, account_id, sleeve_id, sleeve_id),
+                (strategy_id, account_id),
             ).fetchone()
             if not binding:
                 return None
@@ -474,16 +454,14 @@ class TimingStore:
                 """
                 SELECT rowid, * FROM timing_decisions
                 WHERE timing_strategy_id = ? AND account_id = ?
-                  AND (sleeve_id IS NULL OR sleeve_id = ?)
                   AND (strategy_id IS NULL OR strategy_id = ?)
                 ORDER BY
-                  CASE WHEN sleeve_id = ? THEN 0 ELSE 1 END,
                   CASE WHEN strategy_id = ? THEN 0 ELSE 1 END,
                   timestamp DESC,
                   rowid DESC
                 LIMIT 1
                 """,
-                (binding["timing_strategy_id"], account_id, sleeve_id, strategy_id, sleeve_id, strategy_id),
+                (binding["timing_strategy_id"], account_id, strategy_id, strategy_id),
             ).fetchone()
 
         binding_item = _decode_binding(binding)
@@ -515,7 +493,6 @@ class TimingStore:
         *,
         timing_strategy_id: str,
         account_id: str,
-        sleeve_id: str | None,
         strategy_id: str | None,
         run_id: str,
         decision: dict[str, Any],
@@ -541,7 +518,6 @@ class TimingStore:
                 ledger_type="decision",
                 event_type="timing_decision",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=timing_strategy_id,
                 run_id=run_id,
                 symbol=decision.get("symbol"),
@@ -555,10 +531,10 @@ class TimingStore:
                 """
                 INSERT INTO timing_decisions (
                     id, audit_event_id, timing_strategy_id, strategy_id,
-                    account_id, sleeve_id, run_id, timestamp, symbol, allow_open,
+                    account_id, run_id, timestamp, symbol, allow_open,
                     position_policy, target_exposure, valid_until, reason, metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -566,7 +542,6 @@ class TimingStore:
                     timing_strategy_id,
                     strategy_id,
                     account_id,
-                    sleeve_id,
                     run_id,
                     timestamp,
                     decision.get("symbol"),
@@ -584,7 +559,6 @@ class TimingStore:
         self,
         timing_strategy: dict[str, Any],
         account: dict[str, Any],
-        sleeve: dict[str, Any] | None,
         bars: list[dict[str, Any]],
         frequency: str,
         run_id: str,
@@ -594,10 +568,9 @@ class TimingStore:
             "timing_strategy_id": timing_strategy["id"],
             "run_id": run_id,
             "account_id": account["id"],
-            "sleeve_id": sleeve["id"] if sleeve else None,
             "frequency": frequency,
             "account": account,
-            "sleeve": {**sleeve, "positions": self.trading_store.list_positions(sleeve["id"])} if sleeve else {},
+            "positions": self.trading_store.list_positions(account["id"]),
             "bars": bars,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as tmp:
@@ -626,7 +599,6 @@ class TimingStore:
         run_id: str,
         timing_strategy_id: str,
         account_id: str,
-        sleeve_id: str | None,
         strategy_id: str | None,
         frequency: str,
         mode: str,
@@ -641,17 +613,16 @@ class TimingStore:
             conn.execute(
                 """
                 INSERT INTO timing_strategy_runs (
-                    id, timing_strategy_id, account_id, sleeve_id, strategy_id,
+                    id, timing_strategy_id, account_id, strategy_id,
                     frequency, mode, status, bars_processed, decisions_recorded,
                     error, created_at, finished_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
                     timing_strategy_id,
                     account_id,
-                    sleeve_id,
                     strategy_id,
                     frequency,
                     mode,

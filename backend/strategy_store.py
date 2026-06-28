@@ -73,7 +73,6 @@ class StrategyStore:
                     id TEXT PRIMARY KEY,
                     strategy_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
-                    sleeve_id TEXT NOT NULL,
                     frequency TEXT NOT NULL,
                     mode TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -86,6 +85,40 @@ class StrategyStore:
                 )
                 """
             )
+            # 老库迁移:去掉 strategy_runs.sleeve_id 列。
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(strategy_runs)").fetchall()}
+            if "sleeve_id" in cols:
+                conn.execute("ALTER TABLE strategy_runs RENAME TO strategy_runs_legacy")
+                conn.execute(
+                    """
+                    CREATE TABLE strategy_runs (
+                        id TEXT PRIMARY KEY,
+                        strategy_id TEXT NOT NULL,
+                        account_id TEXT NOT NULL,
+                        frequency TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        bars_processed INTEGER NOT NULL,
+                        orders_submitted INTEGER NOT NULL,
+                        error TEXT,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        FOREIGN KEY(strategy_id) REFERENCES strategies(id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO strategy_runs (
+                        id, strategy_id, account_id, frequency, mode, status,
+                        bars_processed, orders_submitted, error, created_at, finished_at
+                    )
+                    SELECT id, strategy_id, account_id, frequency, mode, status,
+                        bars_processed, orders_submitted, error, created_at, finished_at
+                    FROM strategy_runs_legacy
+                    """
+                )
+                conn.execute("DROP TABLE strategy_runs_legacy")
 
     def seed_demo(self) -> None:
         if self.list_strategies():
@@ -171,15 +204,9 @@ class StrategyStore:
         if not strategy:
             raise ValueError(f"unknown strategy_id: {strategy_id}")
         account_id = _required(payload, "account_id")
-        sleeve_id = _required(payload, "sleeve_id")
         account = self.trading_store.get_account(account_id)
-        sleeve = self.trading_store.get_sleeve(sleeve_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        if not sleeve or sleeve["account_id"] != account_id:
-            raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
-        if not sleeve.get("active", True):
-            raise ValueError(f"sleeve {sleeve_id} 已停用(策略暂停)，启用后再运行")
 
         symbols = payload.get("symbols") or ["600519.SH"]
         if isinstance(symbols, str):
@@ -201,7 +228,6 @@ class StrategyStore:
             run_id=run_id,
             strategy_id=strategy_id,
             account_id=account_id,
-            sleeve_id=sleeve_id,
             frequency=frequency,
             mode=f"{data_source}_replay",
             status="running",
@@ -217,7 +243,6 @@ class StrategyStore:
                 ledger_type="system",
                 event_type="strategy_run_started",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 reason="strategy subprocess started",
@@ -225,7 +250,7 @@ class StrategyStore:
             )
         )
 
-        worker_result = self._run_worker(strategy, account, sleeve, bars, frequency, run_id)
+        worker_result = self._run_worker(strategy, account, bars, frequency, run_id)
         if not worker_result["ok"]:
             self._finish_run(run_id, "failed", len(bars), 0, worker_result.get("error"))
             self.audit_store.record_event(
@@ -234,7 +259,6 @@ class StrategyStore:
                     ledger_type="system",
                     event_type="strategy_run_failed",
                     account_id=account_id,
-                    sleeve_id=sleeve_id,
                     strategy_id=strategy_id,
                     run_id=run_id,
                     reason=worker_result.get("error"),
@@ -253,7 +277,6 @@ class StrategyStore:
                         ledger_type="system",
                         event_type="strategy_log",
                         account_id=account_id,
-                        sleeve_id=sleeve_id,
                         strategy_id=strategy_id,
                         run_id=run_id,
                         reason=order.get("message"),
@@ -261,12 +284,11 @@ class StrategyStore:
                     )
                 )
                 continue
-            timing_gate = self._resolve_timing_gate(account_id, sleeve_id, strategy_id, payload)
+            timing_gate = self._resolve_timing_gate(account_id, strategy_id, payload)
             try:
                 broker_result = self.trading_store.place_order(
                     {
                         "account_id": account_id,
-                        "sleeve_id": sleeve_id,
                         "strategy_id": strategy_id,
                         "run_id": run_id,
                         "symbol": order["symbol"],
@@ -302,7 +324,6 @@ class StrategyStore:
                 ledger_type="system",
                 event_type="strategy_run_completed",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 reason=status,
@@ -321,12 +342,11 @@ class StrategyStore:
     def _resolve_timing_gate(
         self,
         account_id: str,
-        sleeve_id: str,
         strategy_id: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         if self.timing_store:
-            gate = self.timing_store.resolve_gate(account_id, sleeve_id, strategy_id)
+            gate = self.timing_store.resolve_gate(account_id, strategy_id)
             if gate:
                 return {
                     **gate,
@@ -345,7 +365,6 @@ class StrategyStore:
         self,
         strategy: dict[str, Any],
         account: dict[str, Any],
-        sleeve: dict[str, Any],
         bars: list[dict[str, Any]],
         frequency: str,
         run_id: str,
@@ -355,10 +374,9 @@ class StrategyStore:
             "strategy_id": strategy["id"],
             "run_id": run_id,
             "account_id": account["id"],
-            "sleeve_id": sleeve["id"],
             "frequency": frequency,
             "account": account,
-            "sleeve": {**sleeve, "positions": self.trading_store.list_positions(sleeve["id"])},
+            "positions": self.trading_store.list_positions(account["id"]),
             "bars": bars,
         }
         with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8", delete=False) as tmp:
@@ -387,7 +405,6 @@ class StrategyStore:
         run_id: str,
         strategy_id: str,
         account_id: str,
-        sleeve_id: str,
         frequency: str,
         mode: str,
         status: str,
@@ -401,17 +418,16 @@ class StrategyStore:
             conn.execute(
                 """
                 INSERT INTO strategy_runs (
-                    id, strategy_id, account_id, sleeve_id, frequency, mode,
+                    id, strategy_id, account_id, frequency, mode,
                     status, bars_processed, orders_submitted, error, created_at,
                     finished_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
                     strategy_id,
                     account_id,
-                    sleeve_id,
                     frequency,
                     mode,
                     status,

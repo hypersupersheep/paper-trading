@@ -25,7 +25,6 @@ class AuditStoreTest(unittest.TestCase):
                 ledger_type="decision",
                 event_type="strategy_signal",
                 account_id="acct",
-                sleeve_id="sleeve",
                 strategy_id="strategy",
                 run_id="run",
                 symbol="600519.SH",
@@ -33,7 +32,6 @@ class AuditStoreTest(unittest.TestCase):
         )
         self.store.record_trade_settlement(
             account_id="acct",
-            sleeve_id="sleeve",
             strategy_id="strategy",
             run_id="run",
             symbol="600519.SH",
@@ -63,7 +61,6 @@ class AuditStoreTest(unittest.TestCase):
     def test_cost_components_are_separate_cash_events(self) -> None:
         self.store.record_trade_settlement(
             account_id="acct",
-            sleeve_id="sleeve",
             strategy_id="strategy",
             run_id="run",
             symbol="000001.SZ",
@@ -93,7 +90,6 @@ class AuditStoreTest(unittest.TestCase):
                 ledger_type="decision",
                 event_type="timing_blocked",
                 account_id="acct",
-                sleeve_id="sleeve",
                 strategy_id="timing",
                 run_id="run",
                 symbol="000858.SZ",

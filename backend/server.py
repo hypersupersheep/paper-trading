@@ -203,7 +203,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 if not account:
                     self._json({"error": f"unknown account_id: {account_id}"}, HTTPStatus.NOT_FOUND)
                     return
-                account["sleeves"] = self.trading.list_sleeves(account_id)
+                account["positions"] = self.trading.list_positions(account_id)
                 self._json({"account": account})
                 return
             if path.startswith("/api/audit/chain/"):
@@ -404,18 +404,6 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/timing-strategies/") and path.endswith("/bind"):
                 timing_strategy_id = unquote(path.removeprefix("/api/timing-strategies/").removesuffix("/bind").strip("/"))
                 self._json({"binding": self.timing.bind_strategy(timing_strategy_id, payload)}, HTTPStatus.CREATED)
-                return
-            if path.startswith("/api/accounts/") and path.endswith("/sleeves"):
-                account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/sleeves").strip("/"))
-                self._json({"sleeve": self.trading.create_sleeve(account_id, payload)}, HTTPStatus.CREATED)
-                return
-            if path.startswith("/api/sleeves/") and path.endswith("/active"):
-                sleeve_id = unquote(path.removeprefix("/api/sleeves/").removesuffix("/active").strip("/"))
-                self._json({"sleeve": self.trading.set_sleeve_active(sleeve_id, payload)}, HTTPStatus.CREATED)
-                return
-            if path.startswith("/api/sleeves/") and path.endswith("/allocation"):
-                sleeve_id = unquote(path.removeprefix("/api/sleeves/").removesuffix("/allocation").strip("/"))
-                self._json({"sleeve": self.trading.adjust_sleeve_allocation(sleeve_id, payload)}, HTTPStatus.CREATED)
                 return
             if path.startswith("/api/accounts/") and path.endswith("/reverse-repo/reconcile"):
                 account_id = unquote(path.removeprefix("/api/accounts/").removesuffix("/reverse-repo/reconcile").strip("/"))
@@ -667,7 +655,6 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             "default_data_source": app_settings.default_data_source(),
             "capabilities": {
                 "accounts": True,
-                "sleeves": True,
                 "paper_broker": True,
                 "market_pricing": True,
                 "risk_gate": True,

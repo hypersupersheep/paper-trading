@@ -104,10 +104,9 @@ class BacktestStore:
         # 1) 选股策略信号
         account = {"id": "bt_account", "name": "Backtest", "commission_rate": friction["commission_rate"],
                    "min_commission": friction["min_commission"], "stamp_duty_rate": friction["stamp_duty_rate"],
-                   "slippage_model": friction["slippage_model"], "slippage_value": friction["slippage_value"]}
-        sleeve = {"id": "bt_sleeve", "name": "Backtest", "strategy_id": strategy_id,
-                  "allocated_cash": initial_cash, "available_cash": initial_cash, "positions": []}
-        worker = self.strategy_store._run_worker(strategy, account, sleeve, bars, frequency, "bt_strategy")
+                   "slippage_model": friction["slippage_model"], "slippage_value": friction["slippage_value"],
+                   "initial_cash": initial_cash, "cash": initial_cash}
+        worker = self.strategy_store._run_worker(strategy, account, bars, frequency, "bt_strategy")
         if not worker.get("ok"):
             raise ValueError(f"策略回测失败: {worker.get('error')}")
         orders = [item for item in worker["orders"] if item.get("event_type") != "strategy_log"]
@@ -120,7 +119,7 @@ class BacktestStore:
             timing = self.timing_store.get_timing_strategy(str(timing_strategy_id))
             if not timing:
                 raise ValueError(f"unknown timing_strategy_id: {timing_strategy_id}")
-            timing_worker = self.timing_store._run_worker(timing, account, sleeve, bars, frequency, "bt_timing")
+            timing_worker = self.timing_store._run_worker(timing, account, bars, frequency, "bt_timing")
             # 择时失败必须报错,绝不能静默吞掉(否则会"假装没有择时"照常跑,误导回测结论)。
             if not timing_worker.get("ok"):
                 raise ValueError(f"择时策略回测失败: {timing_worker.get('error')}")

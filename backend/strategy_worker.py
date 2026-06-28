@@ -11,13 +11,14 @@ from typing import Any
 class WorkerContext:
     def __init__(self, payload: dict[str, Any]):
         self.account_id = payload["account_id"]
-        self.sleeve_id = payload["sleeve_id"]
         self.strategy_id = payload["strategy_id"]
         self.run_id = payload["run_id"]
         self.frequency = payload["frequency"]
-        self.initial_cash = payload["sleeve"]["allocated_cash"]
-        self.available_cash = payload["sleeve"]["available_cash"]
-        self.positions = {item["symbol"]: item for item in payload["sleeve"].get("positions", [])}
+        account = payload["account"]
+        # 单账户单一现金池:初始资金作为 target_percent 的资金基准,当前现金为可用现金。
+        self.initial_cash = account["initial_cash"]
+        self.available_cash = account["cash"]
+        self.positions = {item["symbol"]: item for item in payload.get("positions", [])}
         self._bars = payload["bars"]
         self._index = 0
         self._orders: list[dict[str, Any]] = []

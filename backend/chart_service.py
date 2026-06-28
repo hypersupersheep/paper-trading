@@ -51,7 +51,6 @@ class ChartService:
                     "quantity": trade["quantity"],
                     "amount": trade["amount"],
                     "account_id": trade["account_id"],
-                    "sleeve_id": trade["sleeve_id"],
                     "strategy_id": trade["strategy_id"],
                     "run_id": trade["run_id"],
                     "source_event_id": trade["source_event_id"],

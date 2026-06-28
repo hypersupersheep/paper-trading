@@ -34,15 +34,6 @@ class RiskStoreTest(unittest.TestCase):
                 "slippage_value": 10,
             }
         )
-        self.trading.create_sleeve(
-            "acct_risk",
-            {
-                "id": "sleeve_risk",
-                "name": "Risk Sleeve",
-                "strategy_id": "strategy_risk",
-                "allocated_cash": 500_000,
-            },
-        )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -50,7 +41,6 @@ class RiskStoreTest(unittest.TestCase):
     def _order(self, **overrides) -> dict:
         payload = {
             "account_id": "acct_risk",
-            "sleeve_id": "sleeve_risk",
             "strategy_id": "strategy_risk",
             "run_id": "run_risk",
             "symbol": "600519.SH",
@@ -62,32 +52,30 @@ class RiskStoreTest(unittest.TestCase):
         payload.update(overrides)
         return self.trading.place_order(payload)
 
-    def test_upsert_and_sleeve_override_merge(self) -> None:
+    def test_upsert_account_config_merge_and_update(self) -> None:
         self.risk.upsert_config(
             {"account_id": "acct_risk", "max_order_notional": 100_000, "max_orders_per_day": 10}
         )
-        self.risk.upsert_config(
-            {"account_id": "acct_risk", "sleeve_id": "sleeve_risk", "max_order_notional": 10_000}
-        )
 
         configs = self.risk.list_configs("acct_risk")
-        self.assertEqual({config["scope_type"] for config in configs}, {"account", "sleeve"})
-        limits = self.risk.resolve_limits("acct_risk", "sleeve_risk")
-        self.assertEqual(limits["max_order_notional"], 10_000)
+        self.assertEqual({config["scope_type"] for config in configs}, {"account"})
+        limits = self.risk.resolve_limits("acct_risk")
+        self.assertEqual(limits["max_order_notional"], 100_000)
         self.assertEqual(limits["max_orders_per_day"], 10)
-        self.assertEqual(limits["sources"]["max_order_notional"], "sleeve:sleeve_risk")
+        self.assertEqual(limits["sources"]["max_order_notional"], "account:acct_risk")
         self.assertEqual(limits["sources"]["max_orders_per_day"], "account:acct_risk")
         events = self.audit.list_events({"event_type": "risk_config_updated"})
-        self.assertEqual(len(events), 2)
+        self.assertEqual(len(events), 1)
 
-        # 重复 upsert 同一 scope 是更新而不是新增。
+        # 重复 upsert 同一账户是更新而不是新增(字段整体覆盖)。
         self.risk.upsert_config({"account_id": "acct_risk", "max_order_notional": 50_000})
-        self.assertEqual(len(self.risk.list_configs("acct_risk")), 2)
-        self.assertEqual(self.risk.resolve_limits("acct_risk", "sleeve_risk")["max_orders_per_day"], None)
+        self.assertEqual(len(self.risk.list_configs("acct_risk")), 1)
+        self.assertEqual(self.risk.resolve_limits("acct_risk")["max_order_notional"], 50_000)
+        self.assertEqual(self.risk.resolve_limits("acct_risk")["max_orders_per_day"], None)
 
     def test_disabled_config_is_ignored(self) -> None:
         self.risk.upsert_config({"account_id": "acct_risk", "max_order_notional": 1, "enabled": False})
-        self.assertIsNone(self.risk.resolve_limits("acct_risk", "sleeve_risk"))
+        self.assertIsNone(self.risk.resolve_limits("acct_risk"))
         result = self._order()
         self.assertTrue(result["accepted"])
 
@@ -99,7 +87,7 @@ class RiskStoreTest(unittest.TestCase):
         self.assertFalse(result["accepted"])
         self.assertEqual(result["risk"]["rule"], "max_order_notional")
         self.assertIn("max_order_notional", result["reason"])
-        self.assertEqual(self.trading.list_positions("sleeve_risk"), [])
+        self.assertEqual(self.trading.list_positions("acct_risk"), [])
         chain = self.audit.get_chain("sig_notional_test")
         self.assertEqual(chain["signal"]["event_type"], "strategy_signal")
         self.assertEqual(chain["risk_decision"]["event_type"], "risk_blocked")
@@ -107,7 +95,7 @@ class RiskStoreTest(unittest.TestCase):
         self.assertEqual(chain["risk_decision"]["metadata"]["limit"], 50_000)
         self.assertEqual(chain["order"]["event_type"], "order_rejected")
         self.assertIsNone(chain["trade"])
-        order = self.trading.list_orders({"sleeve_id": "sleeve_risk"})[0]
+        order = self.trading.list_orders({"account_id": "acct_risk"})[0]
         self.assertEqual(order["status"], "rejected")
         self.assertIn("max_order_notional", order["reason"])
 
@@ -121,27 +109,27 @@ class RiskStoreTest(unittest.TestCase):
         self.assertFalse(second["accepted"])
         self.assertEqual(second["risk"]["rule"], "max_symbol_position")
         self.assertEqual(second["risk"]["observed"], 300)
-        self.assertEqual(self.trading.list_positions("sleeve_risk")[0]["quantity"], 200)
+        self.assertEqual(self.trading.list_positions("acct_risk")[0]["quantity"], 200)
 
-    def test_max_sleeve_exposure_rejects_buy_over_limit(self) -> None:
-        self.risk.upsert_config({"account_id": "acct_risk", "max_sleeve_exposure": 0.1})
+    def test_max_exposure_rejects_buy_over_limit(self) -> None:
+        self.risk.upsert_config({"account_id": "acct_risk", "max_exposure": 0.1})
 
-        # 50w 现金买入 10w 市值，敞口 0.2 > 0.1，应拒单。
-        result = self._order(quantity=100, signal_price=1000, fill_price=1000)
+        # 100w 现金买入 20w 市值,敞口 0.2 > 0.1,应拒单。
+        result = self._order(quantity=200, signal_price=1000, fill_price=1000)
 
         self.assertFalse(result["accepted"])
-        self.assertEqual(result["risk"]["rule"], "max_sleeve_exposure")
+        self.assertEqual(result["risk"]["rule"], "max_exposure")
         self.assertAlmostEqual(result["risk"]["observed"], 0.2)
 
     def test_min_cash_buffer_rejects_buy_that_drains_cash(self) -> None:
-        self.risk.upsert_config({"account_id": "acct_risk", "min_cash_buffer": 450_000})
+        self.risk.upsert_config({"account_id": "acct_risk", "min_cash_buffer": 950_000})
 
-        # gross 10w + 手续费/滑点后剩约 39.98w < 45w buffer。
+        # gross 10w + 手续费/滑点后现金约 89.98w < 95w buffer。
         result = self._order(quantity=100, signal_price=1000, fill_price=1000)
 
         self.assertFalse(result["accepted"])
         self.assertEqual(result["risk"]["rule"], "min_cash_buffer")
-        self.assertLess(result["risk"]["observed"], 450_000)
+        self.assertLess(result["risk"]["observed"], 950_000)
 
     def test_max_orders_per_tick_counts_same_run(self) -> None:
         self.risk.upsert_config({"account_id": "acct_risk", "max_orders_per_tick": 1})
@@ -188,14 +176,14 @@ class RiskStoreTest(unittest.TestCase):
                 "account_id": "acct_risk",
                 "max_symbol_position": 100,
                 "min_cash_buffer": 10_000_000,
-                "max_sleeve_exposure": 0.0001,
+                "max_exposure": 0.0001,
             }
         )
 
         sell = self._order(side="SELL", quantity=100, signal_price=110, fill_price=110)
 
         self.assertTrue(sell["accepted"])
-        self.assertEqual(self.trading.list_positions("sleeve_risk")[0]["quantity"], 100)
+        self.assertEqual(self.trading.list_positions("acct_risk")[0]["quantity"], 100)
 
     def test_strategy_run_orders_are_risk_blocked(self) -> None:
         strategy_store = StrategyStore(self.db_path, self.audit, self.trading, self.root / "strategies")
@@ -216,7 +204,6 @@ def on_bar(ctx, bar):
             strategy["id"],
             {
                 "account_id": "acct_risk",
-                "sleeve_id": "sleeve_risk",
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "data_source": "fixture",
@@ -227,7 +214,7 @@ def on_bar(ctx, bar):
         self.assertEqual(result["status"], "completed_with_rejections")
         self.assertGreater(len(result["rejections"]), 0)
         self.assertIn("max_order_notional", result["rejections"][0]["reason"])
-        self.assertEqual(self.trading.list_positions("sleeve_risk"), [])
+        self.assertEqual(self.trading.list_positions("acct_risk"), [])
         blocked = self.audit.list_events({"event_type": "risk_blocked"})
         self.assertGreater(len(blocked), 0)
         chain = self.audit.get_chain(blocked[0]["source_event_id"])
@@ -255,7 +242,6 @@ def on_bar(ctx, bar):
                 "id": "sched_risk",
                 "name": "Risk Gate Tick",
                 "account_id": "acct_risk",
-                "sleeve_id": "sleeve_risk",
                 "strategy_id": "strategy_risk",
                 "data_source": "fixture",
                 "symbols": "000001.SZ",
@@ -269,7 +255,7 @@ def on_bar(ctx, bar):
         tick = scheduler.tick_once("sched_risk", now="2026-06-10T02:00:00+00:00")
 
         self.assertEqual(tick["status"], "completed")
-        self.assertEqual(self.trading.list_positions("sleeve_risk"), [])
+        self.assertEqual(self.trading.list_positions("acct_risk"), [])
         blocked = self.audit.list_events({"event_type": "risk_blocked"})
         self.assertGreater(len(blocked), 0)
         rejected = self.audit.list_events({"event_type": "order_rejected"})

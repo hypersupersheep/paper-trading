@@ -82,6 +82,10 @@ class TradingStore:
             conn.close()
 
     def _ensure_schema(self) -> None:
+        # 老库(含 sleeves 资金单元)迁移到单一账户现金模型;新库直接走下方 CREATE。
+        # 迁移要重建表并丢弃 sleeves,涉及外键关系,故在独立的 foreign_keys=OFF 连接里跑,
+        # 避免 DROP 父表时被旧外键拦住(且整段是一个事务,失败即全回滚)。
+        self._migrate_drop_sleeves()
         with self._connection() as conn:
             conn.execute(
                 """
@@ -89,7 +93,7 @@ class TradingStore:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     initial_cash REAL NOT NULL,
-                    unallocated_cash REAL NOT NULL,
+                    cash REAL NOT NULL,
                     currency TEXT NOT NULL,
                     market TEXT NOT NULL,
                     commission_rate REAL NOT NULL,
@@ -105,31 +109,15 @@ class TradingStore:
             )
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS sleeves (
-                    id TEXT PRIMARY KEY,
-                    account_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    strategy_id TEXT NOT NULL,
-                    allocated_cash REAL NOT NULL,
-                    available_cash REAL NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(account_id) REFERENCES accounts(id)
-                )
-                """
-            )
-            conn.execute(
-                """
                 CREATE TABLE IF NOT EXISTS positions (
                     account_id TEXT NOT NULL,
-                    sleeve_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
                     quantity INTEGER NOT NULL,
                     avg_cost REAL NOT NULL,
                     last_price REAL NOT NULL,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY(account_id, sleeve_id, symbol),
-                    FOREIGN KEY(account_id) REFERENCES accounts(id),
-                    FOREIGN KEY(sleeve_id) REFERENCES sleeves(id)
+                    PRIMARY KEY(account_id, symbol),
+                    FOREIGN KEY(account_id) REFERENCES accounts(id)
                 )
                 """
             )
@@ -139,7 +127,6 @@ class TradingStore:
                     id TEXT PRIMARY KEY,
                     source_event_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
-                    sleeve_id TEXT NOT NULL,
                     strategy_id TEXT NOT NULL,
                     run_id TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -157,18 +144,16 @@ class TradingStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     metadata TEXT NOT NULL DEFAULT '{}',
-                    FOREIGN KEY(account_id) REFERENCES accounts(id),
-                    FOREIGN KEY(sleeve_id) REFERENCES sleeves(id)
+                    FOREIGN KEY(account_id) REFERENCES accounts(id)
                 )
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_paper_orders_filters
-                ON paper_orders (account_id, sleeve_id, strategy_id, symbol, status, created_at)
+                ON paper_orders (account_id, strategy_id, symbol, status, created_at)
                 """
             )
-            self._ensure_column(conn, "sleeves", "active", "INTEGER NOT NULL DEFAULT 1")
             # 国债逆回购独立账本:与审计流水分开,专供逆回购面板(每账户每日一条,upsert)。
             conn.execute(
                 """
@@ -212,48 +197,192 @@ class TradingStore:
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    def _migrate_drop_sleeves(self) -> None:
+        """把老库(账户未分配现金 + sleeve 资金单元)迁到单一 account.cash 模型。
+
+        - 账户现金:cash = 原 unallocated_cash + 各 sleeve 的 available_cash 之和。
+        - 持仓:去掉 sleeve_id,按 (account_id, symbol) 合并(数量相加、成本按量加权)。
+        - 订单:去掉 sleeve_id 列。
+        - 删除 sleeves 表。
+        审计库(append-only)不动:历史行保留 sleeve_id 列,新行不再写。
+        幂等:已是新结构(有 cash 列且无 sleeves 表)直接返回。
+        在 foreign_keys=OFF 的独立连接里整体事务执行,失败即全回滚。
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._run_sleeve_migration(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _run_sleeve_migration(self, conn: sqlite3.Connection) -> None:
+        tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "accounts" not in tables:
+            return  # 全新安装,无需迁移
+        # 清理可能残留的迁移中间表(上次迁移半途中断),保证可重入。
+        for stale in ("accounts_legacy", "positions_legacy", "paper_orders_legacy"):
+            conn.execute(f"DROP TABLE IF EXISTS {stale}")
+        acct_cols = {r["name"] for r in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "cash" in acct_cols and "sleeves" not in tables:
+            return  # 已迁移
+
+        has_sleeves = "sleeves" in tables
+        # 1) accounts:折叠现金 + 把 unallocated_cash 重命名为 cash(整表重建,版本无关)。
+        if "cash" not in acct_cols:
+            owner_sel = "owner" if "owner" in acct_cols else "''"
+            desc_sel = "description" if "description" in acct_cols else "''"
+            sleeve_sum = (
+                "COALESCE((SELECT SUM(available_cash) FROM sleeves WHERE sleeves.account_id = a.id), 0)"
+                if has_sleeves
+                else "0"
+            )
+            conn.execute("ALTER TABLE accounts RENAME TO accounts_legacy")
+            conn.execute(
+                """
+                CREATE TABLE accounts (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    initial_cash REAL NOT NULL,
+                    cash REAL NOT NULL,
+                    currency TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    commission_rate REAL NOT NULL,
+                    min_commission REAL NOT NULL,
+                    stamp_duty_rate REAL NOT NULL,
+                    slippage_model TEXT NOT NULL,
+                    slippage_value REAL NOT NULL,
+                    auto_reverse_repo_enabled INTEGER NOT NULL,
+                    reverse_repo_annual_rate REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    owner TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                INSERT INTO accounts (
+                    id, name, initial_cash, cash, currency, market, commission_rate,
+                    min_commission, stamp_duty_rate, slippage_model, slippage_value,
+                    auto_reverse_repo_enabled, reverse_repo_annual_rate, created_at, owner, description
+                )
+                SELECT id, name, initial_cash,
+                    ROUND(unallocated_cash + {sleeve_sum}, 2),
+                    currency, market, commission_rate, min_commission, stamp_duty_rate,
+                    slippage_model, slippage_value, auto_reverse_repo_enabled,
+                    reverse_repo_annual_rate, created_at, {owner_sel}, {desc_sel}
+                FROM accounts_legacy a
+                """
+            )
+            conn.execute("DROP TABLE accounts_legacy")
+
+        # 2) positions:去 sleeve_id,按 (account_id, symbol) 合并。
+        if "positions" in tables:
+            pos_cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
+            if "sleeve_id" in pos_cols:
+                conn.execute("ALTER TABLE positions RENAME TO positions_legacy")
+                conn.execute(
+                    """
+                    CREATE TABLE positions (
+                        account_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        avg_cost REAL NOT NULL,
+                        last_price REAL NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(account_id, symbol),
+                        FOREIGN KEY(account_id) REFERENCES accounts(id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO positions (account_id, symbol, quantity, avg_cost, last_price, updated_at)
+                    SELECT account_id, symbol, SUM(quantity),
+                        CASE WHEN SUM(quantity) > 0
+                             THEN ROUND(SUM(quantity * avg_cost) / SUM(quantity), 4) ELSE 0 END,
+                        (SELECT last_price FROM positions_legacy p2
+                         WHERE p2.account_id = p.account_id AND p2.symbol = p.symbol
+                         ORDER BY updated_at DESC LIMIT 1),
+                        MAX(updated_at)
+                    FROM positions_legacy p
+                    GROUP BY account_id, symbol
+                    HAVING SUM(quantity) > 0
+                    """
+                )
+                conn.execute("DROP TABLE positions_legacy")
+
+        # 3) paper_orders:去 sleeve_id 列。
+        if "paper_orders" in tables:
+            ord_cols = {r["name"] for r in conn.execute("PRAGMA table_info(paper_orders)").fetchall()}
+            if "sleeve_id" in ord_cols:
+                conn.execute("ALTER TABLE paper_orders RENAME TO paper_orders_legacy")
+                conn.execute(
+                    """
+                    CREATE TABLE paper_orders (
+                        id TEXT PRIMARY KEY,
+                        source_event_id TEXT NOT NULL,
+                        account_id TEXT NOT NULL,
+                        strategy_id TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        order_type TEXT NOT NULL,
+                        time_in_force TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        filled_quantity INTEGER NOT NULL,
+                        remaining_quantity INTEGER NOT NULL,
+                        signal_price REAL NOT NULL,
+                        limit_price REAL,
+                        last_fill_price REAL,
+                        status TEXT NOT NULL,
+                        reason TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        metadata TEXT NOT NULL DEFAULT '{}',
+                        FOREIGN KEY(account_id) REFERENCES accounts(id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO paper_orders (
+                        id, source_event_id, account_id, strategy_id, run_id, symbol, side,
+                        order_type, time_in_force, quantity, filled_quantity, remaining_quantity,
+                        signal_price, limit_price, last_fill_price, status, reason,
+                        created_at, updated_at, metadata
+                    )
+                    SELECT id, source_event_id, account_id, strategy_id, run_id, symbol, side,
+                        order_type, time_in_force, quantity, filled_quantity, remaining_quantity,
+                        signal_price, limit_price, last_fill_price, status, reason,
+                        created_at, updated_at, metadata
+                    FROM paper_orders_legacy
+                    """
+                )
+                conn.execute("DROP TABLE paper_orders_legacy")
+
+        # 4) 丢弃 sleeves 表。
+        conn.execute("DROP TABLE IF EXISTS sleeves")
+
     def seed_demo(self) -> None:
         if self.get_account(DEFAULT_ACCOUNT["id"]):
             return
         account = self.create_account(DEFAULT_ACCOUNT, seed=True)
-        self.create_sleeve(
-            account["id"],
-            {
-                "id": "sleeve_value_5m",
-                "name": "Value Rotation 5m",
-                "strategy_id": "strategy_value_rotation",
-                "allocated_cash": 2_000_000.0,
-            },
-            seed=True,
-        )
-        self.create_sleeve(
-            account["id"],
-            {
-                "id": "sleeve_growth_5m",
-                "name": "Growth Breakout 5m",
-                "strategy_id": "strategy_growth_breakout",
-                "allocated_cash": 1_500_000.0,
-            },
-            seed=True,
-        )
+        # 演示持仓:600519 200 股 @1725.8;现金 = 初始资金 - 持仓成本,使初始净值=初始资金。
+        qty, cost = 200, 1725.8
+        spent = round(qty * cost, 2)
         with self._connection() as conn:
-            conn.execute("UPDATE sleeves SET available_cash = ? WHERE id = ?", (1_654_593.71, "sleeve_value_5m"))
+            conn.execute("UPDATE accounts SET cash = ROUND(cash - ?, 2) WHERE id = ?", (spent, account["id"]))
             conn.execute(
                 """
                 INSERT INTO positions (
-                    account_id, sleeve_id, symbol, quantity, avg_cost, last_price, updated_at
+                    account_id, symbol, quantity, avg_cost, last_price, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    account["id"],
-                    "sleeve_value_5m",
-                    "600519.SH",
-                    200,
-                    1725.8,
-                    1725.8,
-                    _now(),
-                ),
+                (account["id"], "600519.SH", qty, cost, cost, _now()),
             )
 
     def create_account(self, payload: dict[str, Any], *, seed: bool = False) -> dict[str, Any]:
@@ -266,7 +395,7 @@ class TradingStore:
             "name": name,
             "owner": (str(payload.get("owner")).strip() if payload.get("owner") else "") or name,
             "initial_cash": initial_cash,
-            "unallocated_cash": initial_cash,
+            "cash": initial_cash,
             "currency": payload.get("currency") or "CNY",
             "market": payload.get("market") or "CN_A",
             "commission_rate": _float(payload.get("commission_rate"), 0.00008),
@@ -287,7 +416,7 @@ class TradingStore:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    id, name, owner, initial_cash, unallocated_cash, currency, market,
+                    id, name, owner, initial_cash, cash, currency, market,
                     commission_rate, min_commission, stamp_duty_rate, slippage_model,
                     slippage_value, auto_reverse_repo_enabled, reverse_repo_annual_rate,
                     created_at
@@ -299,7 +428,7 @@ class TradingStore:
                     account["name"],
                     account["owner"],
                     account["initial_cash"],
-                    account["unallocated_cash"],
+                    account["cash"],
                     account["currency"],
                     account["market"],
                     account["commission_rate"],
@@ -453,159 +582,10 @@ class TradingStore:
             cur = conn.execute("DELETE FROM account_files WHERE id = ? AND account_id = ?", (file_id, account_id))
         return {"deleted": cur.rowcount > 0, "id": file_id}
 
-    def create_sleeve(self, account_id: str, payload: dict[str, Any], *, seed: bool = False) -> dict[str, Any]:
-        account = self.get_account(account_id)
-        if not account:
-            raise ValueError(f"unknown account_id: {account_id}")
-
-        allocated_cash = _float(payload.get("allocated_cash"), 0.0)
-        if allocated_cash <= 0:
-            raise ValueError("allocated_cash must be positive")
-        if allocated_cash > account["unallocated_cash"]:
-            raise ValueError("allocated_cash exceeds account unallocated cash")
-
-        sleeve_id = payload.get("id") or f"sleeve_{uuid.uuid4().hex[:10]}"
-        now = _now()
-        with self._connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO sleeves (
-                    id, account_id, name, strategy_id, allocated_cash,
-                    available_cash, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sleeve_id,
-                    account_id,
-                    payload.get("name") or payload.get("strategy_id") or "Strategy Sleeve",
-                    payload.get("strategy_id") or f"strategy_{uuid.uuid4().hex[:8]}",
-                    allocated_cash,
-                    allocated_cash,
-                    now,
-                ),
-            )
-            conn.execute(
-                "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash - ?, 2) WHERE id = ?",
-                (allocated_cash, account_id),
-            )
-
-        if not seed:
-            self.audit_store.record_event(
-                AuditEvent(
-                    timestamp=now,
-                    ledger_type="cash",
-                    event_type="sleeve_allocation",
-                    account_id=account_id,
-                    sleeve_id=sleeve_id,
-                    strategy_id=payload.get("strategy_id"),
-                    amount=allocated_cash,
-                    before_state={"unallocated_cash": account["unallocated_cash"]},
-                    after_state={"unallocated_cash": round(account["unallocated_cash"] - allocated_cash, 2)},
-                    reason="capital allocated to strategy sleeve",
-                    metadata={"sleeve_name": payload.get("name")},
-                )
-            )
-        return self.get_sleeve(sleeve_id) or {}
-
-    def set_sleeve_active(self, sleeve_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """启用/停用策略资金单元。停用后该 sleeve 的 BUY、策略运行、调度 tick 都会被拦。"""
-        sleeve = self.get_sleeve(sleeve_id)
-        if not sleeve:
-            raise ValueError(f"unknown sleeve_id: {sleeve_id}")
-        active = bool(payload.get("active", True))
-        now = _now()
-        with self._connection() as conn:
-            conn.execute("UPDATE sleeves SET active = ? WHERE id = ?", (1 if active else 0, sleeve_id))
-        self.audit_store.record_event(
-            AuditEvent(
-                timestamp=now,
-                ledger_type="system",
-                event_type="sleeve_status_changed",
-                account_id=sleeve["account_id"],
-                sleeve_id=sleeve_id,
-                strategy_id=sleeve["strategy_id"],
-                before_state={"active": bool(sleeve.get("active", True))},
-                after_state={"active": active},
-                reason="strategy sleeve enabled" if active else "strategy sleeve paused",
-                metadata={"sleeve_name": sleeve["name"]},
-            )
-        )
-        return self.get_sleeve(sleeve_id) or sleeve
-
-    def adjust_sleeve_allocation(self, sleeve_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """调整 sleeve 资金占比：增量从账户未分配现金划入，减量退回(只能退还未占用的现金)。
-
-        支持 percent(占账户初始资金的百分比, 0-100) 或 allocated_cash(目标金额) 二选一。
-        """
-        sleeve = self.get_sleeve(sleeve_id)
-        if not sleeve:
-            raise ValueError(f"unknown sleeve_id: {sleeve_id}")
-        account = self.get_account(sleeve["account_id"])
-        if not account:
-            raise ValueError(f"unknown account_id: {sleeve['account_id']}")
-
-        if payload.get("percent") not in (None, ""):
-            percent = float(payload["percent"])
-            if percent < 0 or percent > 100:
-                raise ValueError("percent must be between 0 and 100")
-            target = round(account["initial_cash"] * percent / 100, 2)
-        else:
-            target = round(_float(payload.get("allocated_cash"), sleeve["allocated_cash"]), 2)
-            if target < 0:
-                raise ValueError("allocated_cash cannot be negative")
-
-        delta = round(target - float(sleeve["allocated_cash"]), 2)
-        if abs(delta) < 0.01:
-            return sleeve
-        if delta > 0 and delta > account["unallocated_cash"] + 0.001:
-            raise ValueError(
-                f"账户未分配现金不足: 需要 {delta:.2f}, 仅剩 {account['unallocated_cash']:.2f}"
-            )
-        if delta < 0 and -delta > float(sleeve["available_cash"]) + 0.001:
-            raise ValueError(
-                f"sleeve 可退现金不足: 想退回 {-delta:.2f}, 可用现金只有 {sleeve['available_cash']:.2f}(其余已占用在持仓里)"
-            )
-
-        now = _now()
-        with self._connection() as conn:
-            conn.execute(
-                "UPDATE sleeves SET allocated_cash = ROUND(allocated_cash + ?, 2), available_cash = ROUND(available_cash + ?, 2) WHERE id = ?",
-                (delta, delta, sleeve_id),
-            )
-            conn.execute(
-                "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash - ?, 2) WHERE id = ?",
-                (delta, sleeve["account_id"]),
-            )
-        self.audit_store.record_event(
-            AuditEvent(
-                timestamp=now,
-                ledger_type="cash",
-                event_type="sleeve_allocation_adjusted",
-                account_id=sleeve["account_id"],
-                sleeve_id=sleeve_id,
-                strategy_id=sleeve["strategy_id"],
-                amount=delta,
-                before_state={
-                    "allocated_cash": sleeve["allocated_cash"],
-                    "unallocated_cash": account["unallocated_cash"],
-                },
-                after_state={
-                    "allocated_cash": round(sleeve["allocated_cash"] + delta, 2),
-                    "unallocated_cash": round(account["unallocated_cash"] - delta, 2),
-                },
-                reason="sleeve allocation increased" if delta > 0 else "sleeve allocation reduced",
-                metadata={"target_allocated_cash": target},
-            )
-        )
-        return self.get_sleeve(sleeve_id) or sleeve
-
     def list_accounts(self) -> list[dict[str, Any]]:
         with self._connection() as conn:
             rows = conn.execute("SELECT * FROM accounts ORDER BY created_at ASC").fetchall()
         accounts = [_row(row) for row in rows]
-        for account in accounts:
-            account["sleeves"] = self.list_sleeves(account["id"])
         return accounts
 
     def get_account(self, account_id: str) -> dict[str, Any] | None:
@@ -614,7 +594,7 @@ class TradingStore:
         return _row(row) if row else None
 
     def delete_account(self, account_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """删除一个账户及其全部子数据(sleeves / 持仓 / 订单 / 风控 / 择时绑定 / 调度任务)。
+        """删除一个账户及其全部子数据(持仓 / 订单 / 风控 / 择时绑定 / 调度任务)。
 
         安全护栏:账户仍有持仓时默认拒绝,需显式 force=true 才强删,避免误删在用账户。
         审计事件(历史流水)不随之清除——账本是 append-only,删账户不改写历史。
@@ -625,8 +605,7 @@ class TradingStore:
             raise ValueError(f"unknown account_id: {account_id}")
         force = bool(payload.get("force", False))
 
-        sleeves = self.list_sleeves(account_id)
-        position_count = sum(len(sleeve.get("positions", [])) for sleeve in sleeves)
+        position_count = len(self.list_positions(account_id))
         if position_count > 0 and not force:
             raise ValueError(
                 f"账户 {account_id} 仍有 {position_count} 个持仓;确认要删请传 force=true。"
@@ -650,10 +629,9 @@ class TradingStore:
             for table, column in cleanup:
                 if table in existing:
                     conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (account_id,))
-            # 核心外键顺序:positions / paper_orders -> sleeves -> accounts
+            # 核心外键顺序:positions / paper_orders -> accounts
             conn.execute("DELETE FROM positions WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM paper_orders WHERE account_id = ?", (account_id,))
-            conn.execute("DELETE FROM sleeves WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
         self.audit_store.record_event(
@@ -665,7 +643,6 @@ class TradingStore:
                 reason="paper account deleted",
                 metadata={
                     "name": account["name"],
-                    "removed_sleeves": len(sleeves),
                     "removed_positions": position_count,
                     "forced": force,
                 },
@@ -674,7 +651,7 @@ class TradingStore:
         return {
             "deleted": True,
             "id": account_id,
-            "removed": {"sleeves": len(sleeves), "positions": position_count},
+            "removed": {"positions": position_count},
         }
 
     def void_trade(self, account_id: str, trade_event_id: str, reason: str) -> dict[str, Any]:
@@ -695,7 +672,6 @@ class TradingStore:
         if trade_event_id in self.audit_store.voided_trade_event_ids(account_id):
             raise ValueError("该成交已作废,请勿重复操作")
 
-        sleeve_id = trade["sleeve_id"]
         symbol = trade["symbol"]
         side = str((trade.get("metadata") or {}).get("side") or "BUY").upper()
         qty = int(trade["quantity"])
@@ -707,7 +683,7 @@ class TradingStore:
                 if e["event_type"] in {"commission", "stamp_duty", "slippage"}),
             2,
         )
-        # 原始这笔对 sleeve 现金的影响:BUY 减 gross+fees;SELL 加 gross-fees。作废=反向冲回。
+        # 原始这笔对账户现金的影响:BUY 减 gross+fees;SELL 加 gross-fees。作废=反向冲回。
         original_cash_delta = (-(gross) - fees) if side == "BUY" else (gross - fees)
 
         # 先把作废事件记入审计(此后 voided 集合即含本笔),再据"剩余未作废成交"重算持仓。
@@ -717,7 +693,6 @@ class TradingStore:
                 ledger_type="system",
                 event_type="trade_voided",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=trade.get("strategy_id"),
                 symbol=symbol,
                 quantity=qty,
@@ -734,22 +709,22 @@ class TradingStore:
             )
         )
 
-        new_qty, new_avg = self._replay_position(account_id, sleeve_id, symbol)
+        new_qty, new_avg = self._replay_position(account_id, symbol)
         with self._connection() as conn:
             conn.execute(
-                "UPDATE sleeves SET available_cash = ROUND(available_cash - ?, 2) WHERE id = ?",
-                (original_cash_delta, sleeve_id),
+                "UPDATE accounts SET cash = ROUND(cash - ?, 2) WHERE id = ?",
+                (original_cash_delta, account_id),
             )
             if new_qty > 0:
                 conn.execute(
                     "UPDATE positions SET quantity = ?, avg_cost = ?, updated_at = ? "
-                    "WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
-                    (new_qty, round(new_avg, 4), _now(), account_id, sleeve_id, symbol),
+                    "WHERE account_id = ? AND symbol = ?",
+                    (new_qty, round(new_avg, 4), _now(), account_id, symbol),
                 )
             else:
                 conn.execute(
-                    "DELETE FROM positions WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
-                    (account_id, sleeve_id, symbol),
+                    "DELETE FROM positions WHERE account_id = ? AND symbol = ?",
+                    (account_id, symbol),
                 )
         return {
             "voided": True,
@@ -761,14 +736,13 @@ class TradingStore:
             "position_after": new_qty,
         }
 
-    def _replay_position(self, account_id: str, sleeve_id: str, symbol: str) -> tuple[int, float]:
-        """按时间顺序重放该 sleeve+symbol 的未作废成交,得到(数量, 平均成本)。"""
+    def _replay_position(self, account_id: str, symbol: str) -> tuple[int, float]:
+        """按时间顺序重放该 account+symbol 的未作废成交,得到(数量, 平均成本)。"""
         voided = self.audit_store.voided_trade_event_ids(account_id)
         fills = self.audit_store.list_events(
             {
                 "event_type": "trade_filled",
                 "account_id": account_id,
-                "sleeve_id": sleeve_id,
                 "symbol": symbol,
                 "limit": "100000",
             }
@@ -793,22 +767,9 @@ class TradingStore:
                     avg = 0.0
         return qty, avg
 
-    def list_sleeves(self, account_id: str) -> list[dict[str, Any]]:
+    def list_positions(self, account_id: str) -> list[dict[str, Any]]:
         with self._connection() as conn:
-            rows = conn.execute("SELECT * FROM sleeves WHERE account_id = ? ORDER BY created_at ASC", (account_id,)).fetchall()
-        sleeves = [_row(row) for row in rows]
-        for sleeve in sleeves:
-            sleeve["positions"] = self.list_positions(sleeve["id"])
-        return sleeves
-
-    def get_sleeve(self, sleeve_id: str) -> dict[str, Any] | None:
-        with self._connection() as conn:
-            row = conn.execute("SELECT * FROM sleeves WHERE id = ?", (sleeve_id,)).fetchone()
-        return _row(row) if row else None
-
-    def list_positions(self, sleeve_id: str) -> list[dict[str, Any]]:
-        with self._connection() as conn:
-            rows = conn.execute("SELECT * FROM positions WHERE sleeve_id = ? ORDER BY symbol ASC", (sleeve_id,)).fetchall()
+            rows = conn.execute("SELECT * FROM positions WHERE account_id = ? ORDER BY symbol ASC", (account_id,)).fetchall()
         return [_row(row) for row in rows]
 
     def get_portfolio_summary(
@@ -846,7 +807,7 @@ class TradingStore:
         filters = filters or {}
         clauses: list[str] = []
         params: list[Any] = []
-        for field in ("account_id", "sleeve_id", "strategy_id", "symbol", "status"):
+        for field in ("account_id", "strategy_id", "symbol", "status"):
             value = filters.get(field)
             if value:
                 clauses.append(f"{field} = ?")
@@ -900,7 +861,6 @@ class TradingStore:
                 ledger_type="order",
                 event_type="order_cancelled",
                 account_id=order["account_id"],
-                sleeve_id=order["sleeve_id"],
                 strategy_id=order["strategy_id"],
                 run_id=order["run_id"],
                 symbol=order["symbol"],
@@ -915,32 +875,8 @@ class TradingStore:
         )
         return {"cancelled": True, "order": self.get_order(order_id), "event_id": event_id}
 
-    def _resolve_default_sleeve(self, account_id: str) -> str:
-        """返回该账户可用于下单/补录的默认 sleeve;没有就建一个"主仓"(吃下当前未分配现金)。
-
-        让 agent / 单策略用户不必关心 sleeve:不指定 sleeve_id 时自动落到这里。
-        只有真要在一个账户里跑多策略时,才需要显式建/选 sleeve。
-        """
-        sleeves = self.list_sleeves(account_id)
-        if sleeves:
-            return sleeves[0]["id"]
-        account = self.get_account(account_id)
-        if not account:
-            raise ValueError(f"unknown account_id: {account_id}")
-        cash = float(account["unallocated_cash"])
-        if cash <= 0:
-            raise ValueError(
-                f"账户 {account_id} 没有 sleeve 且无可分配现金,无法自动建默认 sleeve;请先手动创建。"
-            )
-        sleeve = self.create_sleeve(
-            account_id,
-            {"name": "主仓", "strategy_id": "manual", "allocated_cash": cash},
-        )
-        return sleeve["id"]
-
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         account_id = _required(payload, "account_id")
-        sleeve_id = payload.get("sleeve_id") or self._resolve_default_sleeve(account_id)
         symbol = _required(payload, "symbol").upper()
         side = _required(payload, "side").upper()
         quantity = int(_float(payload.get("quantity"), 0.0))
@@ -985,11 +921,8 @@ class TradingStore:
             raise ValueError("order_type must be market or limit")
 
         account = self.get_account(account_id)
-        sleeve = self.get_sleeve(sleeve_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        if not sleeve or sleeve["account_id"] != account_id:
-            raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
 
         source_event_id = payload.get("source_event_id") or f"sig_{uuid.uuid4().hex[:12]}"
         self.audit_store.record_event(
@@ -999,7 +932,6 @@ class TradingStore:
                 ledger_type="decision",
                 event_type="strategy_signal",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1013,7 +945,6 @@ class TradingStore:
             order_id=order_id,
             source_event_id=source_event_id,
             account_id=account_id,
-            sleeve_id=sleeve_id,
             strategy_id=strategy_id,
             run_id=run_id,
             symbol=symbol,
@@ -1028,42 +959,6 @@ class TradingStore:
             metadata={"frequency": payload.get("frequency", "5m")},
         )
 
-        # 停用的 sleeve 禁止开新仓(SELL 仍放行, 方便清仓退出)。
-        if side == "BUY" and not sleeve.get("active", True):
-            reason = f"sleeve {sleeve_id} is paused (strategy disabled)"
-            self.audit_store.record_event(
-                AuditEvent(
-                    timestamp=timestamp,
-                    ledger_type="decision",
-                    event_type="sleeve_paused_blocked",
-                    account_id=account_id,
-                    sleeve_id=sleeve_id,
-                    strategy_id=strategy_id,
-                    run_id=run_id,
-                    symbol=symbol,
-                    quantity=quantity,
-                    price=signal_price,
-                    reason=reason,
-                    source_event_id=source_event_id,
-                    metadata={"side": side, "blocked_strategy": strategy_id},
-                )
-            )
-            order_event_id = self._reject_order(
-                order_id=order_id,
-                account_id=account_id,
-                sleeve_id=sleeve_id,
-                strategy_id=strategy_id,
-                run_id=run_id,
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                price=signal_price,
-                timestamp=timestamp,
-                source_event_id=source_event_id,
-                reason=reason,
-            )
-            return {"accepted": False, "reason": reason, "event_id": order_event_id, "source_event_id": source_event_id}
-
         opening_blocked = side == "BUY" and (not allow_open or position_policy in {"reduce_only", "close_all"})
         if opening_blocked:
             self.audit_store.record_event(
@@ -1072,7 +967,6 @@ class TradingStore:
                     ledger_type="decision",
                     event_type="timing_blocked",
                     account_id=account_id,
-                    sleeve_id=sleeve_id,
                     strategy_id=timing_strategy_id,
                     run_id=run_id,
                     symbol=symbol,
@@ -1086,7 +980,6 @@ class TradingStore:
             order_event_id = self._reject_order(
                 order_id=order_id,
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1110,7 +1003,6 @@ class TradingStore:
                 ledger_type="decision",
                 event_type="timing_decision",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=timing_strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1124,8 +1016,7 @@ class TradingStore:
         if self.risk_store:
             risk_breach = self.risk_store.evaluate_order(
                 account=account,
-                sleeve=sleeve,
-                positions=self.list_positions(sleeve_id),
+                positions=self.list_positions(account_id),
                 symbol=symbol,
                 side=side,
                 quantity=quantity,
@@ -1141,7 +1032,6 @@ class TradingStore:
                         ledger_type="decision",
                         event_type="risk_blocked",
                         account_id=account_id,
-                        sleeve_id=sleeve_id,
                         strategy_id=strategy_id,
                         run_id=run_id,
                         symbol=symbol,
@@ -1156,7 +1046,6 @@ class TradingStore:
                 order_event_id = self._reject_order(
                     order_id=order_id,
                     account_id=account_id,
-                    sleeve_id=sleeve_id,
                     strategy_id=strategy_id,
                     run_id=run_id,
                     symbol=symbol,
@@ -1175,8 +1064,8 @@ class TradingStore:
                     "source_event_id": source_event_id,
                 }
 
-        position = self._get_position(account_id, sleeve_id, symbol)
-        available_cash = float(sleeve["available_cash"])
+        position = self._get_position(account_id, symbol)
+        available_cash = float(account["cash"])
         position_before = int(position["quantity"]) if position else 0
         avg_cost_before = float(position["avg_cost"]) if position else 0.0
         fill_quantity = _fill_quantity(payload.get("fill_quantity"), quantity)
@@ -1195,7 +1084,6 @@ class TradingStore:
             order_event_id = self._reject_order(
                 order_id=order_id,
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1204,13 +1092,13 @@ class TradingStore:
                 price=signal_price,
                 timestamp=timestamp,
                 source_event_id=source_event_id,
-                reason="insufficient sleeve cash",
+                reason="insufficient cash",
             )
-            return {"accepted": False, "reason": "insufficient sleeve cash", "event_id": order_event_id, "source_event_id": source_event_id}
+            return {"accepted": False, "reason": "insufficient cash", "event_id": order_event_id, "source_event_id": source_event_id}
         # 校验A(时序):显式(可能回溯)时间的卖单,按"该时点持仓"校验,防"未持有先卖"凭空造现金。
         sell_limit = position_before
         if payload.get("timestamp"):
-            sell_limit = self.audit_store.net_position_asof(account_id, sleeve_id, symbol, timestamp)
+            sell_limit = self.audit_store.net_position_asof(account_id, symbol, timestamp)
         if side == "SELL" and fill_quantity > sell_limit:
             reject_reason = (
                 "insufficient position quantity"
@@ -1220,7 +1108,6 @@ class TradingStore:
             order_event_id = self._reject_order(
                 order_id=order_id,
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1245,7 +1132,6 @@ class TradingStore:
                 ledger_type="order",
                 event_type="order_submitted",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1295,7 +1181,6 @@ class TradingStore:
 
         self.audit_store.record_trade_settlement(
             account_id=account_id,
-            sleeve_id=sleeve_id,
             strategy_id=strategy_id,
             run_id=run_id,
             symbol=symbol,
@@ -1319,7 +1204,6 @@ class TradingStore:
                 ledger_type="order",
                 event_type="order_filled" if order_status == "filled" else "order_partially_filled",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1344,32 +1228,32 @@ class TradingStore:
 
         available_cash_after = round(available_cash + cash_delta, 2)
         with self._connection() as conn:
-            conn.execute("UPDATE sleeves SET available_cash = ? WHERE id = ?", (available_cash_after, sleeve_id))
+            conn.execute("UPDATE accounts SET cash = ? WHERE id = ?", (available_cash_after, account_id))
             if position_after == 0:
                 conn.execute(
-                    "DELETE FROM positions WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
-                    (account_id, sleeve_id, symbol),
+                    "DELETE FROM positions WHERE account_id = ? AND symbol = ?",
+                    (account_id, symbol),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO positions (
-                        account_id, sleeve_id, symbol, quantity, avg_cost, last_price, updated_at
+                        account_id, symbol, quantity, avg_cost, last_price, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(account_id, sleeve_id, symbol)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, symbol)
                     DO UPDATE SET
                         quantity = excluded.quantity,
                         avg_cost = excluded.avg_cost,
                         last_price = excluded.last_price,
                         updated_at = excluded.updated_at
                     """,
-                    (account_id, sleeve_id, symbol, position_after, avg_cost_after, fill_price, timestamp),
+                    (account_id, symbol, position_after, avg_cost_after, fill_price, timestamp),
                 )
 
         if fill_quantity > 0:
             events.publish({
-                "type": "trade_filled", "account_id": account_id, "sleeve_id": sleeve_id,
+                "type": "trade_filled", "account_id": account_id,
                 "symbol": symbol, "side": side, "quantity": fill_quantity, "price": fill_price,
                 "timestamp": str(timestamp),
             })
@@ -1393,7 +1277,7 @@ class TradingStore:
     def backfill_trade(self, payload: dict[str, Any]) -> dict[str, Any]:
         """交易历史补充：仅用于补录此前未被系统记录的【真实历史成交】。
 
-        与正常策略下单(place_order)的关键区别——本方法**绕过择时/风控/sleeve停用门控**,
+        与正常策略下单(place_order)的关键区别——本方法**绕过择时/风控门控**,
         因为补录的是已经发生的既成事实,而不是一笔新决策;但它仍然严格维护账本一致性
         (现金、持仓数量、持仓成本),并给每条补录打上 backfill 标记写入审计链,便于和正常
         策略流水区分。
@@ -1402,7 +1286,6 @@ class TradingStore:
         正常模拟交易不应走这里;此功能只用于补历史,除回测外不要用它造交易。
         """
         account_id = _required(payload, "account_id")
-        sleeve_id = payload.get("sleeve_id") or self._resolve_default_sleeve(account_id)
         symbol = _required(payload, "symbol").upper()
         side = _required(payload, "side").upper()
         trade_date = _required(payload, "trade_date")
@@ -1425,24 +1308,21 @@ class TradingStore:
         timestamp = _trade_timestamp(trade_date, payload.get("trade_time"))
 
         account = self.get_account(account_id)
-        sleeve = self.get_sleeve(sleeve_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        if not sleeve or sleeve["account_id"] != account_id:
-            raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
 
-        position = self._get_position(account_id, sleeve_id, symbol)
+        position = self._get_position(account_id, symbol)
         position_before = int(position["quantity"]) if position else 0
         avg_cost_before = float(position["avg_cost"]) if position else 0.0
-        available_cash = float(sleeve["available_cash"])
+        available_cash = float(account["cash"])
 
         # 校验A(时序):卖出按"该交易日当时持仓"(成交事件按时序重建)校验,而非当前实时持仓。
         # 否则"6/15 卖出 6/16 才买入的票"会蒙混过关,凭空造出现金/负持仓。
         if side == "SELL":
-            held_asof = self.audit_store.net_position_asof(account_id, sleeve_id, symbol, timestamp)
+            held_asof = self.audit_store.net_position_asof(account_id, symbol, timestamp)
             if quantity > held_asof:
                 raise ValueError(
-                    f"补录卖出 {quantity} 股,但按交易日时序,{trade_date} 当时该 sleeve 只持有 {symbol} {held_asof} 股;"
+                    f"补录卖出 {quantity} 股,但按交易日时序,{trade_date} 当时该账户只持有 {symbol} {held_asof} 股;"
                     f"不能卖出当时还没买入的部分(请先按时间顺序补录买入)。"
                 )
 
@@ -1460,8 +1340,8 @@ class TradingStore:
 
         if side == "BUY" and available_cash + cash_delta < -0.001:
             raise ValueError(
-                f"补录买入需现金 {gross_amount + total_cost:.2f},但该 sleeve 可用现金仅 {available_cash:.2f};"
-                f"请调整 sleeve 资金或核对补录数据。"
+                f"补录买入需现金 {gross_amount + total_cost:.2f},但账户可用现金仅 {available_cash:.2f};"
+                f"请核对补录数据。"
             )
 
         if side == "BUY":
@@ -1485,7 +1365,6 @@ class TradingStore:
                 ledger_type="decision",
                 event_type="trade_backfill_declared",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1500,7 +1379,6 @@ class TradingStore:
             order_id=order_id,
             source_event_id=source_event_id,
             account_id=account_id,
-            sleeve_id=sleeve_id,
             strategy_id=strategy_id,
             run_id=run_id,
             symbol=symbol,
@@ -1517,7 +1395,6 @@ class TradingStore:
         # 3) 结算:复用与正常成交相同的审计拆分(现金本金/佣金/印花税/持仓)。
         self.audit_store.record_trade_settlement(
             account_id=account_id,
-            sleeve_id=sleeve_id,
             strategy_id=strategy_id,
             run_id=run_id,
             symbol=symbol,
@@ -1543,34 +1420,34 @@ class TradingStore:
             reason="historical trade backfilled",
         )
 
-        # 4) 落地持仓与 sleeve 现金(与 place_order 成交路径一致)。
+        # 4) 落地持仓与账户现金(与 place_order 成交路径一致)。
         available_cash_after = round(available_cash + cash_delta, 2)
         with self._connection() as conn:
-            conn.execute("UPDATE sleeves SET available_cash = ? WHERE id = ?", (available_cash_after, sleeve_id))
+            conn.execute("UPDATE accounts SET cash = ? WHERE id = ?", (available_cash_after, account_id))
             if position_after == 0:
                 conn.execute(
-                    "DELETE FROM positions WHERE account_id = ? AND sleeve_id = ? AND symbol = ?",
-                    (account_id, sleeve_id, symbol),
+                    "DELETE FROM positions WHERE account_id = ? AND symbol = ?",
+                    (account_id, symbol),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO positions (
-                        account_id, sleeve_id, symbol, quantity, avg_cost, last_price, updated_at
+                        account_id, symbol, quantity, avg_cost, last_price, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(account_id, sleeve_id, symbol)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, symbol)
                     DO UPDATE SET
                         quantity = excluded.quantity,
                         avg_cost = excluded.avg_cost,
                         last_price = excluded.last_price,
                         updated_at = excluded.updated_at
                     """,
-                    (account_id, sleeve_id, symbol, position_after, avg_cost_after, price, timestamp),
+                    (account_id, symbol, position_after, avg_cost_after, price, timestamp),
                 )
 
         events.publish({
-            "type": "trade_filled", "account_id": account_id, "sleeve_id": sleeve_id,
+            "type": "trade_filled", "account_id": account_id,
             "symbol": symbol, "side": side, "quantity": quantity, "price": price,
             "timestamp": str(timestamp), "backfill": True,
         })
@@ -1603,12 +1480,8 @@ class TradingStore:
             raise ValueError(f"unknown account_id: {account_id}")
         if not account["auto_reverse_repo_enabled"]:
             raise ValueError("auto reverse repo is disabled for this account")
-        # 可投金额=账户总闲置现金(未分配 + 各 sleeve 可用现金),与自动逆回购口径一致;
-        # 否则现金都在 sleeve 里时未分配≈0,手动逆回购会误报"超出"。
-        idle_cash = round(
-            float(account["unallocated_cash"]) + sum(float(s["available_cash"]) for s in self.list_sleeves(account_id)),
-            2,
-        )
+        # 可投金额=账户闲置现金,与自动逆回购口径一致。
+        idle_cash = round(float(account["cash"]), 2)
         amount = _float(payload.get("amount"), idle_cash)
         if amount <= 0:
             raise ValueError("amount must be positive")
@@ -1646,7 +1519,7 @@ class TradingStore:
         )
         with self._connection() as conn:
             conn.execute(
-                "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
+                "UPDATE accounts SET cash = ROUND(cash + ?, 2) WHERE id = ?",
                 (round(interest - prev_interest, 2), account_id),
             )
         events.publish({
@@ -1735,7 +1608,7 @@ class TradingStore:
                 )
                 if reverted_interest:
                     conn.execute(
-                        "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash - ?, 2) WHERE id = ?",
+                        "UPDATE accounts SET cash = ROUND(cash - ?, 2) WHERE id = ?",
                         (reverted_interest, account_id),
                     )
             existing = {
@@ -1773,7 +1646,7 @@ class TradingStore:
             # 新补入的利息计入账户未分配现金(幂等:只计新增,重跑不重复计)。
             if new_interest:
                 conn.execute(
-                    "UPDATE accounts SET unallocated_cash = ROUND(unallocated_cash + ?, 2) WHERE id = ?",
+                    "UPDATE accounts SET cash = ROUND(cash + ?, 2) WHERE id = ?",
                     (round(new_interest, 2), account_id),
                 )
         if inserted or new_interest:
@@ -1809,62 +1682,22 @@ class TradingStore:
         }
 
     def _portfolio_for_account(self, account: dict[str, Any], mark_prices: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        sleeves = self.list_sleeves(account["id"])
-        sleeve_summaries: list[dict[str, Any]] = []
         positions: list[dict[str, Any]] = []
-        sleeve_cash = 0.0
-        allocated_cash = 0.0
         market_value = 0.0
         cost_basis = 0.0
         unrealized_pnl = 0.0
         holdings_day_pnl = 0.0
 
-        for sleeve in sleeves:
-            sleeve_positions = []
-            sleeve_market_value = 0.0
-            sleeve_cost_basis = 0.0
-            sleeve_unrealized_pnl = 0.0
-            for position in sleeve.get("positions", []):
-                enriched = _enrich_position(position, sleeve, account["id"], mark_prices)
-                sleeve_positions.append(enriched)
-                positions.append(enriched)
-                sleeve_market_value += enriched["market_value"]
-                sleeve_cost_basis += enriched["cost_basis"]
-                sleeve_unrealized_pnl += enriched["unrealized_pnl"]
-                holdings_day_pnl += enriched.get("day_pnl") or 0.0
+        for position in self.list_positions(account["id"]):
+            enriched = _enrich_position(position, account["id"], mark_prices)
+            positions.append(enriched)
+            market_value += enriched["market_value"]
+            cost_basis += enriched["cost_basis"]
+            unrealized_pnl += enriched["unrealized_pnl"]
+            holdings_day_pnl += enriched.get("day_pnl") or 0.0
 
-            sleeve_available_cash = _money(sleeve["available_cash"])
-            sleeve_allocated_cash = _money(sleeve["allocated_cash"])
-            sleeve_equity = _money(sleeve_available_cash + sleeve_market_value)
-            sleeve_pnl = _money(sleeve_equity - sleeve_allocated_cash)
-            sleeve_cash += sleeve_available_cash
-            allocated_cash += sleeve_allocated_cash
-            market_value += sleeve_market_value
-            cost_basis += sleeve_cost_basis
-            unrealized_pnl += sleeve_unrealized_pnl
-            sleeve_summaries.append(
-                {
-                    "id": sleeve["id"],
-                    "account_id": sleeve["account_id"],
-                    "name": sleeve["name"],
-                    "strategy_id": sleeve["strategy_id"],
-                    "active": bool(sleeve.get("active", True)),
-                    "allocated_pct": _ratio(sleeve_allocated_cash, account["initial_cash"]),
-                    "allocated_cash": sleeve_allocated_cash,
-                    "available_cash": sleeve_available_cash,
-                    "market_value": _money(sleeve_market_value),
-                    "cost_basis": _money(sleeve_cost_basis),
-                    "unrealized_pnl": _money(sleeve_unrealized_pnl),
-                    "equity": sleeve_equity,
-                    "pnl": sleeve_pnl,
-                    "pnl_pct": _ratio(sleeve_pnl, sleeve_allocated_cash),
-                    "exposure": _ratio(sleeve_market_value, sleeve_equity),
-                    "positions": sleeve_positions,
-                }
-            )
-
-        unallocated_cash = _money(account["unallocated_cash"])
-        equity = _money(unallocated_cash + sleeve_cash + market_value)
+        cash = _money(account["cash"])
+        equity = _money(cash + market_value)
         pnl = _money(equity - account["initial_cash"])
         return {
             "id": account["id"],
@@ -1874,10 +1707,8 @@ class TradingStore:
             "currency": account["currency"],
             "market": account["market"],
             "initial_cash": _money(account["initial_cash"]),
-            "unallocated_cash": unallocated_cash,
-            "allocated_cash": _money(allocated_cash),
-            "sleeve_cash": _money(sleeve_cash),
-            "total_cash": _money(unallocated_cash + sleeve_cash),
+            "cash": cash,
+            "total_cash": cash,
             "market_value": _money(market_value),
             "cost_basis": _money(cost_basis),
             "unrealized_pnl": _money(unrealized_pnl),
@@ -1886,18 +1717,14 @@ class TradingStore:
             "pnl": pnl,
             "pnl_pct": _ratio(pnl, account["initial_cash"]),
             "exposure": _ratio(market_value, equity),
-            "sleeves": sleeve_summaries,
             "positions": positions,
         }
 
-    def _get_position(self, account_id: str, sleeve_id: str, symbol: str) -> dict[str, Any] | None:
+    def _get_position(self, account_id: str, symbol: str) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute(
-                """
-                SELECT * FROM positions
-                WHERE account_id = ? AND sleeve_id = ? AND symbol = ?
-                """,
-                (account_id, sleeve_id, symbol),
+                "SELECT * FROM positions WHERE account_id = ? AND symbol = ?",
+                (account_id, symbol),
             ).fetchone()
         return _row(row) if row else None
 
@@ -1906,7 +1733,6 @@ class TradingStore:
         *,
         order_id: str,
         account_id: str,
-        sleeve_id: str,
         strategy_id: str,
         run_id: str,
         symbol: str,
@@ -1940,7 +1766,7 @@ class TradingStore:
 
         # 推送拒单事件(风控/择时/现金/持仓/时序等各种拦截统一在此一处)。
         events.publish({
-            "type": "order_rejected", "account_id": account_id, "sleeve_id": sleeve_id,
+            "type": "order_rejected", "account_id": account_id,
             "symbol": symbol, "side": side, "quantity": quantity, "reason": reason,
             "timestamp": str(timestamp),
         })
@@ -1950,7 +1776,6 @@ class TradingStore:
                 ledger_type="order",
                 event_type="order_rejected",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -1971,7 +1796,6 @@ class TradingStore:
         order_id: str,
         source_event_id: str,
         account_id: str,
-        sleeve_id: str,
         strategy_id: str,
         run_id: str,
         symbol: str,
@@ -1990,18 +1814,17 @@ class TradingStore:
             conn.execute(
                 """
                 INSERT INTO paper_orders (
-                    id, source_event_id, account_id, sleeve_id, strategy_id, run_id,
+                    id, source_event_id, account_id, strategy_id, run_id,
                     symbol, side, order_type, time_in_force, quantity, filled_quantity,
                     remaining_quantity, signal_price, limit_price, last_fill_price,
                     status, reason, created_at, updated_at, metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order_id,
                     source_event_id,
                     account_id,
-                    sleeve_id,
                     strategy_id,
                     run_id,
                     symbol,
@@ -2029,7 +1852,6 @@ class TradingStore:
                 ledger_type="order",
                 event_type="order_created",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -2180,7 +2002,6 @@ def _decode_order(row: sqlite3.Row) -> dict[str, Any]:
 
 def _enrich_position(
     position: dict[str, Any],
-    sleeve: dict[str, Any],
     account_id: str,
     mark_prices: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -2197,9 +2018,6 @@ def _enrich_position(
     day_pnl = _money(quantity * (mark_price - float(prev_close))) if prev_close else 0.0
     return {
         "account_id": account_id,
-        "sleeve_id": sleeve["id"],
-        "sleeve_name": sleeve["name"],
-        "strategy_id": sleeve["strategy_id"],
         "symbol": position["symbol"],
         "name": security_names.resolve(position["symbol"]),
         "quantity": quantity,
@@ -2223,9 +2041,7 @@ def _enrich_position(
 def _portfolio_totals(accounts: list[dict[str, Any]]) -> dict[str, Any]:
     fields = [
         "initial_cash",
-        "unallocated_cash",
-        "allocated_cash",
-        "sleeve_cash",
+        "cash",
         "total_cash",
         "market_value",
         "cost_basis",

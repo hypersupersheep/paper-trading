@@ -16,7 +16,7 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 # 限额字段统一在这里声明：API、merge、前端字段保持一致，新增规则只需扩展此表。
 RISK_LIMIT_FIELDS = [
     "max_order_notional",
-    "max_sleeve_exposure",
+    "max_exposure",
     "max_symbol_position",
     "min_cash_buffer",
     "max_orders_per_tick",
@@ -29,8 +29,8 @@ INTEGER_LIMIT_FIELDS = {"max_symbol_position", "max_orders_per_tick", "max_order
 class RiskStore:
     """Pre-trade risk gate(交易前风控门控) 的配置与检查层。
 
-    配置分 account 级和 sleeve 级，逐字段 merge：sleeve 配置覆盖 account 配置。
-    检查在 paper broker 接单前执行，命中即拒单，不做部分放行。
+    配置为 account 级(单账户单一现金池)。检查在 paper broker 接单前执行，
+    命中即拒单，不做部分放行。
     """
 
     def __init__(self, db_path: str | Path, audit_store: AuditStore, trading_store: Any | None = None):
@@ -67,7 +67,7 @@ class RiskStore:
                     account_id TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     max_order_notional REAL,
-                    max_sleeve_exposure REAL,
+                    max_exposure REAL,
                     max_symbol_position INTEGER,
                     min_cash_buffer REAL,
                     max_orders_per_tick INTEGER,
@@ -78,20 +78,20 @@ class RiskStore:
                 )
                 """
             )
+            # 老库迁移:max_sleeve_exposure -> max_exposure;并清掉 sleeve 级配置(已无 sleeve)。
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(risk_configs)").fetchall()}
+            if "max_sleeve_exposure" in cols and "max_exposure" not in cols:
+                conn.execute("ALTER TABLE risk_configs RENAME COLUMN max_sleeve_exposure TO max_exposure")
+            conn.execute("DELETE FROM risk_configs WHERE scope_type = 'sleeve'")
 
     def upsert_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         account_id = _required(payload, "account_id")
-        sleeve_id = payload.get("sleeve_id") or None
         if self.trading_store:
             if not self.trading_store.get_account(account_id):
                 raise ValueError(f"unknown account_id: {account_id}")
-            if sleeve_id:
-                sleeve = self.trading_store.get_sleeve(str(sleeve_id))
-                if not sleeve or sleeve["account_id"] != account_id:
-                    raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
 
-        scope_type = "sleeve" if sleeve_id else "account"
-        scope_id = str(sleeve_id) if sleeve_id else account_id
+        scope_type = "account"
+        scope_id = account_id
         limits: dict[str, Any] = {}
         for field in RISK_LIMIT_FIELDS:
             limits[field] = _limit_value(field, payload.get(field))
@@ -106,7 +106,7 @@ class RiskStore:
                 """
                 INSERT INTO risk_configs (
                     id, scope_type, scope_id, account_id, enabled,
-                    max_order_notional, max_sleeve_exposure, max_symbol_position,
+                    max_order_notional, max_exposure, max_symbol_position,
                     min_cash_buffer, max_orders_per_tick, max_orders_per_day,
                     created_at, updated_at
                 )
@@ -115,7 +115,7 @@ class RiskStore:
                 DO UPDATE SET
                     enabled = excluded.enabled,
                     max_order_notional = excluded.max_order_notional,
-                    max_sleeve_exposure = excluded.max_sleeve_exposure,
+                    max_exposure = excluded.max_exposure,
                     max_symbol_position = excluded.max_symbol_position,
                     min_cash_buffer = excluded.min_cash_buffer,
                     max_orders_per_tick = excluded.max_orders_per_tick,
@@ -129,7 +129,7 @@ class RiskStore:
                     account_id,
                     enabled,
                     limits["max_order_notional"],
-                    limits["max_sleeve_exposure"],
+                    limits["max_exposure"],
                     limits["max_symbol_position"],
                     limits["min_cash_buffer"],
                     limits["max_orders_per_tick"],
@@ -145,7 +145,6 @@ class RiskStore:
                 ledger_type="system",
                 event_type="risk_config_updated",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 reason=f"risk config updated for {scope_type} {scope_id}",
                 metadata={"config_id": config.get("id"), "enabled": bool(enabled), **limits},
             )
@@ -174,24 +173,17 @@ class RiskStore:
             ).fetchone()
         return _decode_config(row) if row else None
 
-    def resolve_limits(self, account_id: str, sleeve_id: str) -> dict[str, Any] | None:
-        """逐字段 merge：sleeve 设置了的限额覆盖 account 限额，未设置则回落。"""
+    def resolve_limits(self, account_id: str) -> dict[str, Any] | None:
+        """取该账户启用的风控限额。"""
         account_config = self.get_config("account", account_id)
-        sleeve_config = self.get_config("sleeve", sleeve_id)
-        layers = [
-            config
-            for config in (account_config, sleeve_config)
-            if config and config["enabled"]
-        ]
-        if not layers:
+        if not account_config or not account_config["enabled"]:
             return None
         limits: dict[str, Any] = {field: None for field in RISK_LIMIT_FIELDS}
         sources: dict[str, str] = {}
-        for config in layers:
-            for field in RISK_LIMIT_FIELDS:
-                if config.get(field) is not None:
-                    limits[field] = config[field]
-                    sources[field] = f"{config['scope_type']}:{config['scope_id']}"
+        for field in RISK_LIMIT_FIELDS:
+            if account_config.get(field) is not None:
+                limits[field] = account_config[field]
+                sources[field] = f"account:{account_id}"
         if all(value is None for value in limits.values()):
             return None
         limits["sources"] = sources
@@ -201,7 +193,6 @@ class RiskStore:
         self,
         *,
         account: dict[str, Any],
-        sleeve: dict[str, Any],
         positions: list[dict[str, Any]],
         symbol: str,
         side: str,
@@ -215,7 +206,7 @@ class RiskStore:
 
         BUY 检查全部规则；SELL 是减仓方向，只检查单笔金额和订单频次。
         """
-        limits = self.resolve_limits(account["id"], sleeve["id"])
+        limits = self.resolve_limits(account["id"])
         if not limits:
             return None
 
@@ -256,36 +247,36 @@ class RiskStore:
                     f"position {position_after} shares of {symbol} exceeds limit {int(limit)}",
                 )
 
-            limit = limits["max_sleeve_exposure"]
+            limit = limits["max_exposure"]
             if limit is not None:
-                available_cash = float(sleeve["available_cash"])
+                available_cash = float(account["cash"])
                 equity = available_cash + existing_market_value
                 projected_market_value = existing_market_value + quantity * fill_price
                 # 买入是现金换持仓，equity 近似不变，所以用买前 equity 做分母。
                 exposure_after = projected_market_value / equity if equity > 0 else float("inf")
                 if exposure_after > limit:
                     return breach(
-                        "max_sleeve_exposure",
+                        "max_exposure",
                         exposure_after,
                         limit,
-                        f"sleeve exposure {exposure_after:.4f} exceeds limit {limit:.4f}",
+                        f"exposure {exposure_after:.4f} exceeds limit {limit:.4f}",
                     )
 
             limit = limits["min_cash_buffer"]
             if limit is not None:
-                cash_after = float(sleeve["available_cash"]) - self._estimated_buy_cost(account, quantity, fill_price)
+                cash_after = float(account["cash"]) - self._estimated_buy_cost(account, quantity, fill_price)
                 if cash_after < limit:
                     return breach(
                         "min_cash_buffer",
                         cash_after,
                         limit,
-                        f"sleeve cash after order {cash_after:.2f} below buffer {limit:.2f}",
+                        f"account cash after order {cash_after:.2f} below buffer {limit:.2f}",
                     )
 
         limit = limits["max_orders_per_tick"]
         if limit is not None:
             # 当前订单已写入 paper_orders(status=created)，计数包含自身。
-            count = self._order_count(sleeve["id"], run_id=run_id)
+            count = self._order_count(account["id"], run_id=run_id)
             if count > limit:
                 return breach(
                     "max_orders_per_tick",
@@ -297,7 +288,7 @@ class RiskStore:
         limit = limits["max_orders_per_day"]
         if limit is not None:
             trade_date = _cn_date(timestamp)
-            count = self._order_count(sleeve["id"], trade_date=trade_date)
+            count = self._order_count(account["id"], trade_date=trade_date)
             if count > limit:
                 return breach(
                     "max_orders_per_day",
@@ -307,9 +298,9 @@ class RiskStore:
                 )
         return None
 
-    def _order_count(self, sleeve_id: str, *, run_id: str | None = None, trade_date: str | None = None) -> int:
-        clauses = ["sleeve_id = ?", "status != 'rejected'"]
-        params: list[Any] = [sleeve_id]
+    def _order_count(self, account_id: str, *, run_id: str | None = None, trade_date: str | None = None) -> int:
+        clauses = ["account_id = ?", "status != 'rejected'"]
+        params: list[Any] = [account_id]
         if run_id:
             clauses.append("run_id = ?")
             params.append(run_id)

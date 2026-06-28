@@ -36,7 +36,7 @@ const state = {
 
 // 侧边栏导航：每个 data-view 区块属于一个视图，切换时只显示当前视图。
 const VIEW_META = {
-  overview: ["组合概览", "账户净值 · sleeve 表现 · 持仓"],
+  overview: ["组合概览", "账户净值 · 持仓"],
   performance: ["绩效分析", "净值 · 回撤 · 滚动夏普 · 月度收益"],
   backtest: ["策略回测", "选策略 · 区间 · 摩擦 · 基准 → 一键回测"],
   strategy: ["策略工作台", "导入 Python 选股策略并回放运行"],
@@ -1081,10 +1081,16 @@ function togglePriceType() {
 
 function ticketContext() {
   const account = state.accounts.find((item) => item.id === $("orderAccount").value);
-  const sleeve = account?.sleeves.find((item) => item.id === $("orderSleeve").value);
   const symbol = ($("orderSymbol").value || "").trim().toUpperCase();
   const price = Number($("orderSignalPrice").value) || state.ticketLast || 0;
-  return { account, sleeve, symbol, price };
+  return { account, symbol, price };
+}
+
+// 账户可用现金:优先组合概览口径(cash),退回账户字段。
+function accountCash(account) {
+  if (!account) return 0;
+  const summary = state.portfolio?.accounts?.find((a) => a.id === account.id);
+  return Number(summary?.cash ?? account.cash ?? 0);
 }
 
 async function selectTicketSymbol(symbol) {
@@ -1115,16 +1121,17 @@ async function refreshTicketQuote() {
 }
 
 function ticketMaxShares() {
-  const { sleeve, price } = ticketContext();
-  if (!sleeve || !price) return 0;
+  const { account, price } = ticketContext();
+  const cash = accountCash(account);
+  if (!cash || !price) return 0;
   // 按可用现金反推最大可买股数(留 0.1% 覆盖费用),A股 100 股整手。
-  return Math.floor((sleeve.available_cash * 0.999) / price / 100) * 100;
+  return Math.floor((cash * 0.999) / price / 100) * 100;
 }
 
 function applyQuickQty(fraction) {
   const max = ticketMaxShares();
   if (!max) {
-    showToast("请先选择 sleeve 并确认现价");
+    showToast("请先选择账户并确认现价");
     return;
   }
   $("orderQuantity").value = Math.max(Math.floor((max * fraction) / 100) * 100, 0);
@@ -1132,12 +1139,12 @@ function applyQuickQty(fraction) {
 }
 
 function updateTicketEstimate() {
-  const { sleeve, price } = ticketContext();
+  const { account, price } = ticketContext();
   const qty = Number($("orderQuantity").value) || 0;
   const max = ticketMaxShares();
-  $("ticketMaxShares").textContent = sleeve
-    ? `可用 ¥${formatNumber(sleeve.available_cash)} · 最多 ${formatNumber(max)} 股`
-    : "选择 sleeve 后显示可用资金";
+  $("ticketMaxShares").textContent = account
+    ? `可用 ¥${formatNumber(accountCash(account))} · 最多 ${formatNumber(max)} 股`
+    : "选择账户后显示可用资金";
   $("ticketEstimate").textContent = price
     ? `预估金额 ¥${formatNumber(qty * price)}`
     : "预估金额 --（市价单按最新行情成交）";
@@ -1148,7 +1155,7 @@ function renderBlotter() {
   const positions = state.portfolio?.accounts?.[0]?.positions || [];
   const body = $("blotter");
   if (!positions.length) {
-    body.innerHTML = '<tr class="empty"><td colspan="9">暂无持仓 — 在右侧 Ticket 买入后显示</td></tr>';
+    body.innerHTML = '<tr class="empty"><td colspan="8">暂无持仓 — 在右侧 Ticket 买入后显示</td></tr>';
     return;
   }
   body.innerHTML = positions
@@ -1156,14 +1163,13 @@ function renderBlotter() {
       (position) => `
       <tr>
         <td class="sym">${position.name && position.name !== position.symbol ? `${position.name}<br><small>${position.symbol}</small>` : position.symbol}</td>
-        <td>${findStrategyName(position.strategy_id)}</td>
         <td>${formatNumber(position.quantity)}</td>
         <td>${formatNumber(position.avg_cost)}</td>
         <td>${formatNumber(position.mark_price)}</td>
         <td>${formatNumber(position.market_value)}</td>
         <td class="${numberClass(position.unrealized_pnl)}">${formatNumber(position.unrealized_pnl)} (${formatPercent(position.unrealized_pnl_pct)})</td>
         <td>${position.volatility == null ? "--" : formatPercent(position.volatility)}</td>
-        <td><button type="button" class="danger close-pos" data-sleeve="${position.sleeve_id}" data-symbol="${position.symbol}" data-qty="${position.quantity}" data-strategy="${position.strategy_id}">平仓</button></td>
+        <td><button type="button" class="danger close-pos" data-symbol="${position.symbol}" data-qty="${position.quantity}">平仓</button></td>
       </tr>`,
     )
     .join("");
@@ -1172,11 +1178,9 @@ function renderBlotter() {
 async function handleBlotterClick(event) {
   const button = event.target.closest("button.close-pos");
   if (!button) return;
-  const { sleeve, symbol, qty, strategy } = button.dataset;
+  const { symbol, qty } = button.dataset;
   const data = await postJson("/api/broker/orders", {
     account_id: state.portfolio?.accounts?.[0]?.id,
-    sleeve_id: sleeve,
-    strategy_id: strategy,
     symbol,
     side: "SELL",
     quantity: Number(qty),
@@ -1417,10 +1421,9 @@ function showStorageRestart(text) {
 
 function renderAccountControls() {
   const accountOptions = state.accounts
-    .map((account) => `<option value="${account.id}">${account.name} · ${formatNumber(account.unallocated_cash)} 可用</option>`)
+    .map((account) => `<option value="${account.id}">${account.name} · ${formatNumber(account.cash)} 可用</option>`)
     .join("");
   for (const id of [
-    "sleeveAccount",
     "orderAccount",
     "repoAccount",
     "backfillAccount",
@@ -1454,23 +1457,7 @@ function renderAccountControls() {
     // 逆回购卡的账户跟随活动账户,保证"逆回购记录"展示的就是当前账户。
     if (state.accounts.some((account) => account.id === activeAccount)) $("repoAccount").value = activeAccount;
   }
-  renderSleeveOptions();
-  renderBackfillSleeves();
-  renderStrategyRunSleeves();
-  renderTimingSleeves();
-  renderSchedulerSleeves();
-  renderRiskSleeves();
   updateRepoAmountDefault();
-}
-
-function renderBackfillSleeves() {
-  const accountId = $("backfillAccount").value || state.accounts[0]?.id;
-  const account = state.accounts.find((item) => item.id === accountId);
-  const previous = $("backfillSleeve").value;
-  $("backfillSleeve").innerHTML = (account?.sleeves || [])
-    .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${formatNumber(sleeve.available_cash)} cash</option>`)
-    .join("");
-  if (previous) $("backfillSleeve").value = previous;
 }
 
 // 数值更新闪动(签名微交互):值变化时按 A股红涨绿跌闪一下,呼应实时成交流。
@@ -1522,60 +1509,6 @@ function updateTicker(account) {
   flashValue($("tickerCash"), account.total_cash, `¥${formatNumber(account.total_cash)}`);
   flashValue($("tickerMv"), account.market_value, `¥${formatNumber(account.market_value)}`);
   flashValue($("tickerExposure"), account.exposure, formatPercent(account.exposure));
-}
-
-function renderRiskSleeves() {
-  const accountId = $("riskAccount").value || state.accounts[0]?.id;
-  const account = state.accounts.find((item) => item.id === accountId);
-  const previous = $("riskSleeve").value;
-  // 空值代表账户级配置；选中 sleeve 则是 sleeve 级配置(覆盖账户级)。
-  $("riskSleeve").innerHTML =
-    '<option value="">账户级(全部 sleeve)</option>' +
-    (account?.sleeves || [])
-      .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${sleeve.strategy_id}</option>`)
-      .join("");
-  if (previous) $("riskSleeve").value = previous;
-}
-
-function renderSleeveOptions() {
-  const accountId = $("orderAccount").value || state.accounts[0]?.id;
-  const account = state.accounts.find((item) => item.id === accountId);
-  const options = (account?.sleeves || [])
-    .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${formatNumber(sleeve.available_cash)} cash</option>`)
-    .join("");
-  $("orderSleeve").innerHTML = options;
-}
-
-function renderStrategyRunSleeves() {
-  const accountId = $("strategyRunAccount").value || state.accounts[0]?.id;
-  const account = state.accounts.find((item) => item.id === accountId);
-  const options = (account?.sleeves || [])
-    .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${sleeve.strategy_id}</option>`)
-    .join("");
-  $("strategyRunSleeve").innerHTML = options;
-}
-
-function renderTimingSleeves() {
-  for (const [accountSelectId, sleeveSelectId] of [
-    ["timingBindAccount", "timingBindSleeve"],
-    ["timingRunAccount", "timingRunSleeve"],
-  ]) {
-    const accountId = $(accountSelectId).value || state.accounts[0]?.id;
-    const account = state.accounts.find((item) => item.id === accountId);
-    const options = (account?.sleeves || [])
-      .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${sleeve.strategy_id}</option>`)
-      .join("");
-    $(sleeveSelectId).innerHTML = options;
-  }
-}
-
-function renderSchedulerSleeves() {
-  const accountId = $("schedulerAccount").value || state.accounts[0]?.id;
-  const account = state.accounts.find((item) => item.id === accountId);
-  const options = (account?.sleeves || [])
-    .map((sleeve) => `<option value="${sleeve.id}">${sleeve.name} · ${sleeve.strategy_id}</option>`)
-    .join("");
-  $("schedulerSleeve").innerHTML = options;
 }
 
 const DEFAULT_SOURCE_KEY = "pt_default_data_source";
@@ -1671,7 +1604,7 @@ function renderTimingControls() {
         (binding) => `
           <div class="binding-row">
             <strong>${findTimingName(binding.timing_strategy_id)}</strong>
-            <span>${findStrategyName(binding.strategy_id)} · ${binding.sleeve_id || "account-wide"}</span>
+            <span>${findStrategyName(binding.strategy_id)}</span>
             <span>${binding.active ? "active" : "paused"}</span>
           </div>
         `,
@@ -1769,18 +1702,18 @@ function renderSchedulerControls() {
 }
 
 function renderStrategyBoard() {
-  const account = state.portfolio?.accounts?.[0];
+  const accounts = state.portfolio?.accounts || [];
   const container = $("strategyBoard");
-  if (!account || !account.sleeves.length) {
-    container.innerHTML = '<div class="board-empty">暂无策略 sleeve。在「模拟交易」页创建 sleeve 并分配资金后，这里会按策略展示持仓矩阵。</div>';
+  const withPositions = accounts.filter((account) => (account.positions || []).length);
+  if (!withPositions.length) {
+    container.innerHTML = '<div class="board-empty">暂无持仓。在「模拟交易」页下单后，这里会按账户展示持仓矩阵。</div>';
     return;
   }
-  container.innerHTML = account.sleeves
-    .map((sleeve) => {
-      const allocatedPct = (Number(sleeve.allocated_pct || 0) * 100).toFixed(1);
-      const rows = (sleeve.positions || [])
+  container.innerHTML = withPositions
+    .map((account) => {
+      const rows = (account.positions || [])
         .map((position) => {
-          const weight = sleeve.equity ? position.market_value / sleeve.equity : 0;
+          const weight = account.equity ? position.market_value / account.equity : 0;
           return `
             <tr>
               <td class="sym">${position.name && position.name !== position.symbol ? `${position.name}<br><small>${position.symbol}</small>` : position.symbol}</td>
@@ -1795,60 +1728,27 @@ function renderStrategyBoard() {
         })
         .join("");
       return `
-        <div class="strategy-card ${sleeve.active ? "" : "paused"}" data-sleeve-id="${sleeve.id}">
+        <div class="strategy-card">
           <div class="strategy-card-head">
             <div class="strategy-card-title">
-              <strong>${findStrategyName(sleeve.strategy_id)}</strong>
-              <span>${sleeve.name} · 权益 ${formatNumber(sleeve.equity)} · <b class="${numberClass(sleeve.pnl)}">${formatNumber(sleeve.pnl)}</b></span>
-            </div>
-            <div class="strategy-card-controls">
-              <label class="alloc">占比
-                <input type="number" min="0" max="100" step="0.5" value="${allocatedPct}" data-field="percent" /> %
-              </label>
-              <button type="button" data-action="allocate">调整</button>
-              <label class="switch">
-                <input type="checkbox" data-action="toggle" ${sleeve.active ? "checked" : ""} />启用
-              </label>
+              <strong>${account.name}</strong>
+              <span>权益 ${formatNumber(account.equity)} · <b class="${numberClass(account.pnl)}">${formatNumber(account.pnl)}</b></span>
             </div>
           </div>
-          ${
-            rows
-              ? `<div class="strategy-table-wrap"><table class="strategy-table">
-                  <thead><tr><th>代码</th><th>数量</th><th>仓位</th><th>买入价</th><th>实时价</th><th>波动率</th><th>浮动盈亏</th></tr></thead>
-                  <tbody>${rows}</tbody>
-                </table></div>`
-              : '<div class="board-empty">该策略暂无持仓</div>'
-          }
+          <div class="strategy-table-wrap"><table class="strategy-table">
+            <thead><tr><th>代码</th><th>数量</th><th>仓位</th><th>买入价</th><th>实时价</th><th>波动率</th><th>浮动盈亏</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table></div>
         </div>
       `;
     })
     .join("");
 }
 
-async function handleStrategyBoardAction(event) {
-  const card = event.target.closest(".strategy-card");
-  const sleeveId = card?.dataset.sleeveId;
-  if (!sleeveId) return;
-  if (event.target.matches("input[data-action='toggle']")) {
-    const active = event.target.checked;
-    await postJson(`/api/sleeves/${encodeURIComponent(sleeveId)}/active`, { active });
-    showToast(active ? "策略已启用" : "策略已停用：新开仓与调度将被拦截，仍可卖出退出");
-    await refreshAll();
-    return;
-  }
-  const button = event.target.closest("button[data-action='allocate']");
-  if (button) {
-    const input = card.querySelector("input[data-field='percent']");
-    await postJson(`/api/sleeves/${encodeURIComponent(sleeveId)}/allocation`, { percent: Number(input.value) });
-    showToast(`占比已调整为 ${input.value}%`);
-    await refreshAll();
-  }
-}
-
 function renderRiskControls() {
   const limitLabels = [
     ["max_order_notional", "单笔金额"],
-    ["max_sleeve_exposure", "敞口比例"],
+    ["max_exposure", "敞口比例"],
     ["max_symbol_position", "单标的持仓"],
     ["min_cash_buffer", "现金缓冲"],
     ["max_orders_per_tick", "每Tick订单"],
@@ -1858,30 +1758,20 @@ function renderRiskControls() {
     state.riskConfigs
       .map((config) => {
         const scopeName =
-          config.scope_type === "sleeve"
-            ? findSleeveName(config.scope_id)
-            : state.accounts.find((account) => account.id === config.scope_id)?.name || config.scope_id;
+          state.accounts.find((account) => account.id === config.scope_id)?.name || config.scope_id;
         const limits = limitLabels
           .filter(([field]) => config[field] !== null && config[field] !== undefined)
           .map(([field, label]) => `${label} ${formatNumber(config[field])}`)
           .join(" · ");
         return `
           <div class="risk-row">
-            <strong>${config.scope_type === "sleeve" ? "Sleeve" : "Account"} · ${scopeName}</strong>
+            <strong>Account · ${scopeName}</strong>
             <span>${limits || "--"}</span>
             <strong class="${config.enabled ? "enabled" : "disabled"}">${config.enabled ? "enabled" : "off"}</strong>
           </div>
         `;
       })
       .join("") || '<div class="risk-row"><span>暂无风控规则</span><span>保存配置后，下单前会自动检查并拦截超限订单</span><span>idle</span></div>';
-}
-
-function findSleeveName(sleeveId) {
-  for (const account of state.accounts) {
-    const sleeve = (account.sleeves || []).find((item) => item.id === sleeveId);
-    if (sleeve) return sleeve.name;
-  }
-  return sleeveId;
 }
 
 function renderOrderBook() {
@@ -1994,7 +1884,6 @@ function renderPortfolio() {
       $(id).textContent = "--";
       $(id).className = "";
     }
-    $("portfolioSleeves").innerHTML = '<div class="portfolio-row"><span>暂无 sleeve</span><span>--</span></div>';
     $("portfolioPositions").innerHTML = '<div class="portfolio-row"><span>暂无持仓</span><span>--</span></div>';
     return;
   }
@@ -2015,24 +1904,6 @@ function renderPortfolio() {
   $("portfolioMarketValue").textContent = formatNumber(account.market_value);
   $("portfolioExposure").textContent = formatPercent(account.exposure);
 
-  $("portfolioSleeves").innerHTML =
-    account.sleeves
-      .map(
-        (sleeve) => `
-          <div class="portfolio-row">
-            <div>
-              <strong>${sleeve.name}</strong>
-              <span>${sleeve.strategy_id}</span>
-            </div>
-            <div>
-              <strong>${formatNumber(sleeve.equity)}</strong>
-              <span class="${numberClass(sleeve.pnl)}">${formatNumber(sleeve.pnl)} · ${formatPercent(sleeve.exposure)}</span>
-            </div>
-          </div>
-        `,
-      )
-      .join("") || '<div class="portfolio-row"><span>暂无 sleeve</span><span>--</span></div>';
-
   $("portfolioPositions").innerHTML =
     account.positions
       .map(
@@ -2040,7 +1911,7 @@ function renderPortfolio() {
           <div class="portfolio-row">
             <div>
               <strong>${position.name && position.name !== position.symbol ? position.name : ""} <span class="pos-code">${position.symbol}</span></strong>
-              <span>${position.sleeve_name} · ${position.quantity} 股 · 成本 ${formatNumber(position.avg_cost)} · 现价 ${formatNumber(position.mark_price)}</span>
+              <span>${position.quantity} 股 · 成本 ${formatNumber(position.avg_cost)} · 现价 ${formatNumber(position.mark_price)}</span>
             </div>
             <div>
               <strong>${formatNumber(position.market_value)}</strong>
@@ -2336,24 +2207,11 @@ async function createAccount(event) {
   applyAccountEditMode();
 }
 
-async function createSleeve(event) {
-  event.preventDefault();
-  const accountId = $("sleeveAccount").value;
-  const data = await postJson(`/api/accounts/${encodeURIComponent(accountId)}/sleeves`, {
-    name: $("newSleeveName").value.trim(),
-    strategy_id: $("newSleeveStrategy").value.trim(),
-    allocated_cash: Number($("newSleeveCash").value),
-  });
-  $("accountFilter").value = accountId;
-  showToast(`已创建 Sleeve ${data.sleeve.name}`);
-  await refreshAll();
-}
-
 async function submitOrder(event) {
   event.preventDefault();
-  const { account, sleeve, symbol } = ticketContext();
-  if (!sleeve) {
-    showToast("请先选择账户与 sleeve");
+  const { account, symbol } = ticketContext();
+  if (!account) {
+    showToast("请先选择账户");
     return;
   }
   const side = $("orderSide").value;
@@ -2364,8 +2222,6 @@ async function submitOrder(event) {
   }
   const payload = {
     account_id: account.id,
-    sleeve_id: sleeve.id,
-    strategy_id: sleeve.strategy_id || "strategy_manual_5m",
     symbol,
     side,
     quantity,
@@ -2418,11 +2274,10 @@ async function handleOrderBookAction(event) {
   }
 }
 
-// 逆回购"投入现金"默认填该账户总闲置现金(未分配 + 各 sleeve 可用),与后端口径一致。
+// 逆回购"投入现金"默认填该账户闲置现金,与后端口径一致。
 function accountIdleCash(account) {
   if (!account) return 0;
-  const sleeveCash = (account.sleeves || []).reduce((s, sl) => s + Number(sl.available_cash || 0), 0);
-  return Math.floor((Number(account.unallocated_cash || 0) + sleeveCash) * 100) / 100;
+  return Math.floor(Number(account.cash || 0) * 100) / 100;
 }
 
 function updateRepoAmountDefault() {
@@ -2528,11 +2383,11 @@ async function deleteAccount() {
   if (!accountId) return;
   const label = select.options[select.selectedIndex]?.text || accountId;
   const force = $("deleteAccountForce").checked;
-  if (!window.confirm(`确定删除账户「${label}」？\n将一并清除其 sleeve / 持仓 / 订单,不可撤销。`)) return;
+  if (!window.confirm(`确定删除账户「${label}」？\n将一并清除其持仓 / 订单,不可撤销。`)) return;
   try {
     const data = await postJson(`/api/accounts/${encodeURIComponent(accountId)}/delete`, { force });
     msg.className = "backfill-msg ok";
-    msg.textContent = `已删除 ${data.id}（清理 ${data.removed.sleeves} sleeve、${data.removed.positions} 持仓）`;
+    msg.textContent = `已删除 ${data.id}（清理 ${data.removed.positions} 持仓）`;
     showToast("账户已删除");
     if ($("accountFilter").value === accountId) $("accountFilter").value = "";
     await refreshAll();
@@ -2546,7 +2401,6 @@ async function submitBackfill(event) {
   event.preventDefault();
   const msg = $("backfillMsg");
   const accountId = $("backfillAccount").value;
-  const sleeveId = $("backfillSleeve").value;
   const symbol = $("backfillSymbol").value.trim().toUpperCase();
   const price = Number($("backfillPrice").value);
   const quantity = Number($("backfillQuantity").value);
@@ -2560,7 +2414,6 @@ async function submitBackfill(event) {
   try {
     const data = await postJson("/api/broker/backfill", {
       account_id: accountId,
-      sleeve_id: sleeveId,
       symbol,
       side: $("backfillSide").value,
       quantity,
@@ -2598,10 +2451,8 @@ async function runStrategy(event) {
   event.preventDefault();
   const strategyId = $("strategySelect").value;
   const accountId = $("strategyRunAccount").value;
-  const sleeveId = $("strategyRunSleeve").value;
   const data = await postJson(`/api/strategies/${encodeURIComponent(strategyId)}/run`, {
     account_id: accountId,
-    sleeve_id: sleeveId,
     data_source: $("strategyDataSource").value,
     symbols: $("strategySymbols").value,
     frequency: $("strategyFrequency").value,
@@ -2638,7 +2489,6 @@ async function bindTimingStrategy(event) {
   const data = await postJson(`/api/timing-strategies/${encodeURIComponent(timingStrategyId)}/bind`, {
     strategy_id: $("timingBindStockStrategy").value,
     account_id: $("timingBindAccount").value,
-    sleeve_id: $("timingBindSleeve").value,
     active: true,
   });
   $("accountFilter").value = data.binding.account_id;
@@ -2654,7 +2504,6 @@ async function runTimingStrategy(event) {
   const controlledStrategyId = $("timingRunControlledStrategy").value;
   const data = await postJson(`/api/timing-strategies/${encodeURIComponent(timingStrategyId)}/run`, {
     account_id: $("timingRunAccount").value,
-    sleeve_id: $("timingRunSleeve").value,
     strategy_id: controlledStrategyId,
     data_source: $("timingRunDataSource").value,
     symbols: $("timingRunSymbols").value,
@@ -2677,13 +2526,12 @@ async function saveRiskConfig(event) {
   event.preventDefault();
   const payload = {
     account_id: $("riskAccount").value,
-    sleeve_id: $("riskSleeve").value || null,
     enabled: $("riskEnabled").checked,
   };
   // 留空的限额不提交，表示该字段不限制(或回落到账户级配置)。
   const numberFields = [
     ["max_order_notional", "riskMaxOrderNotional"],
-    ["max_sleeve_exposure", "riskMaxSleeveExposure"],
+    ["max_exposure", "riskMaxExposure"],
     ["max_symbol_position", "riskMaxSymbolPosition"],
     ["min_cash_buffer", "riskMinCashBuffer"],
     ["max_orders_per_tick", "riskMaxOrdersPerTick"],
@@ -2705,7 +2553,6 @@ async function createSchedulerTask(event) {
   const data = await postJson("/api/scheduler/tasks", {
     name: $("schedulerName").value.trim(),
     account_id: $("schedulerAccount").value,
-    sleeve_id: $("schedulerSleeve").value,
     strategy_id: $("schedulerStrategy").value,
     timing_strategy_id: $("schedulerTiming").value || null,
     data_source: $("schedulerDataSource").value,
@@ -2963,10 +2810,8 @@ $("resetFilters").addEventListener("click", resetFilters);
 $("exportCsv").addEventListener("click", () => download("csv"));
 $("exportJson").addEventListener("click", () => download("json"));
 $("orderAccount").addEventListener("change", () => {
-  renderSleeveOptions();
   updateTicketEstimate();
 });
-$("orderSleeve").addEventListener("change", updateTicketEstimate);
 $("orderQuantity").addEventListener("input", updateTicketEstimate);
 $("orderPriceType").addEventListener("change", togglePriceType);
 $("orderSymbol").addEventListener("change", () => refreshTicketQuote().catch(() => {}));
@@ -2992,11 +2837,6 @@ $("btHistory").addEventListener("click", (event) => {
 });
 $("btExportCsv").addEventListener("click", () => exportBacktest("csv"));
 $("btExportJson").addEventListener("click", () => exportBacktest("json"));
-$("strategyRunAccount").addEventListener("change", renderStrategyRunSleeves);
-$("timingBindAccount").addEventListener("change", renderTimingSleeves);
-$("timingRunAccount").addEventListener("change", renderTimingSleeves);
-$("schedulerAccount").addEventListener("change", renderSchedulerSleeves);
-$("riskAccount").addEventListener("change", renderRiskSleeves);
 $("riskForm").addEventListener("submit", (event) => saveRiskConfig(event).catch((error) => showToast(error.message)));
 $("sidebarNav").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-view]");
@@ -3026,7 +2866,6 @@ async function setDefaultDataSource(source) {
   // 用新数据源刷新依赖行情的视图。
   await refreshAll().catch(() => {});
 }
-$("strategyBoard").addEventListener("click", (event) => handleStrategyBoardAction(event).catch((error) => showToast(error.message)));
 $("loadQuote").addEventListener("click", () => loadQuote().catch((error) => showToast(error.message)));
 $("adminLinkSave").addEventListener("click", () => saveAdminLink().catch((error) => showToast(error.message)));
 $("adminLinkRegisterAll").addEventListener("click", () => registerAllAccounts().catch((error) => showToast(error.message)));
@@ -3044,7 +2883,6 @@ $("descFiles").addEventListener("click", (event) => {
   const btn = event.target.closest(".desc-del");
   if (btn) deleteDescFile(btn.dataset.file).catch((error) => showToast(error.message));
 });
-$("sleeveForm").addEventListener("submit", (event) => createSleeve(event).catch((error) => showToast(error.message)));
 $("orderForm").addEventListener("submit", (event) => submitOrder(event).catch((error) => showToast(error.message)));
 $("orderBook").addEventListener("click", (event) => handleOrderBookAction(event).catch((error) => showToast(error.message)));
 $("repoForm").addEventListener("submit", (event) => runReverseRepo(event).catch((error) => showToast(error.message)));
@@ -3054,7 +2892,6 @@ $("repoAccount").addEventListener("change", (event) =>
   setActiveAccount(event.target.value).catch((error) => showToast(error.message)),
 );
 $("backfillForm").addEventListener("submit", (event) => submitBackfill(event).catch((error) => showToast(error.message)));
-$("backfillAccount").addEventListener("change", renderBackfillSleeves);
 $("deleteAccountBtn").addEventListener("click", () => deleteAccount().catch((error) => showToast(error.message)));
 $("strategyFile").addEventListener("change", (event) =>
   loadPythonFile(event, {

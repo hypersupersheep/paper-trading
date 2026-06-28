@@ -84,10 +84,6 @@ class AdapterIntegrationTest(unittest.TestCase):
         self.timing = TimingStore(self.db_path, self.audit, self.trading, root / "timing")
         self.strategies = StrategyStore(self.db_path, self.audit, self.trading, root / "strategies", self.timing)
         self.trading.create_account({"id": "acct_adapter", "name": "Adapter Account", "initial_cash": 1_000_000})
-        self.trading.create_sleeve(
-            "acct_adapter",
-            {"id": "sleeve_adapter", "name": "Adapter Sleeve", "strategy_id": "strategy_adapter", "allocated_cash": 500_000},
-        )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -95,7 +91,7 @@ class AdapterIntegrationTest(unittest.TestCase):
     def _run(self, strategy_id: str) -> dict:
         return self.strategies.run_strategy(
             strategy_id,
-            {"account_id": "acct_adapter", "sleeve_id": "sleeve_adapter", "bars": FIXTURE_BARS, "frequency": "5m"},
+            {"account_id": "acct_adapter", "bars": FIXTURE_BARS, "frequency": "5m"},
         )
 
     def test_handle_bar_strategy_places_orders(self) -> None:
@@ -113,7 +109,7 @@ class AdapterIntegrationTest(unittest.TestCase):
         result = self._run("strategy_handle_bar")
         self.assertEqual(result["status"], "completed")
         self.assertGreater(result["orders_submitted"], 0)
-        self.assertGreater(self.trading.list_positions("sleeve_adapter")[0]["quantity"], 0)
+        self.assertGreater(self.trading.list_positions("acct_adapter")[0]["quantity"], 0)
 
     def test_signal_function_strategy_places_orders(self) -> None:
         self.strategies.create_strategy(
@@ -161,7 +157,7 @@ class AdapterIntegrationTest(unittest.TestCase):
         )
         result = self.timing.run_timing_strategy(
             "timing_signal",
-            {"account_id": "acct_adapter", "sleeve_id": "sleeve_adapter", "bars": FIXTURE_BARS, "frequency": "5m"},
+            {"account_id": "acct_adapter", "bars": FIXTURE_BARS, "frequency": "5m"},
         )
         self.assertEqual(result["status"], "completed")
         self.assertGreater(result["decisions_recorded"], 0)

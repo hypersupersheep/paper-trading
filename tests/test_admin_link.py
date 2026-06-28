@@ -59,7 +59,7 @@ class AdminLinkTest(unittest.TestCase):
         node = self.admin_link.node_descriptor(8123)
         self.assertEqual(node["name"], "Alice机")
         self.assertTrue(node["base_url"].endswith(":8123"))
-        self.assertEqual(node["api_version"], 1)
+        self.assertEqual(node["api_version"], 2)
         self.assertEqual(node["token"], self.admin_link.node_token())  # node.token = 节点反控 token
         seg = self.admin_link.account_segment({"id": "acct_x", "name": "主账户", "initial_cash": 1_000_000})
         self.assertEqual(seg["owner"], "主账户")  # owner 缺省回退 name

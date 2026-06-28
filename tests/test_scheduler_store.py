@@ -22,15 +22,6 @@ class SchedulerStoreTest(unittest.TestCase):
         self.strategies = StrategyStore(self.db_path, self.audit, self.trading, root / "strategies", self.timing)
         self.scheduler = SchedulerStore(self.db_path, self.audit, self.trading, self.strategies, self.timing)
         self.trading.create_account({"id": "acct_sched", "name": "Scheduler Account", "initial_cash": 1_000_000})
-        self.trading.create_sleeve(
-            "acct_sched",
-            {
-                "id": "sleeve_sched",
-                "name": "Scheduler Sleeve",
-                "strategy_id": "strategy_sched",
-                "allocated_cash": 500_000,
-            },
-        )
         self.timing_strategy = self.timing.create_timing_strategy(
             {
                 "id": "timing_sched",
@@ -86,7 +77,7 @@ def on_bar(ctx, bar):
         self.assertEqual(task["ticks_started"], 1)
         self.assertEqual(task["ticks_completed"], 1)
         self.assertIsNone(task["next_tick_at"])
-        positions = self.trading.list_positions("sleeve_sched")
+        positions = self.trading.list_positions("acct_sched")
         self.assertEqual(positions[0]["symbol"], "000001.SZ")
         completed_events = self.audit.list_events({"event_type": "scheduler_tick_completed"})
         self.assertEqual(completed_events[0]["metadata"]["strategy_run_id"], tick["strategy_run_id"])
@@ -104,7 +95,7 @@ def on_bar(ctx, bar):
         self.assertEqual(task["ticks_started"], 2)
         self.assertEqual(task["ticks_completed"], 1)
         self.assertEqual(task["ticks_skipped"], 1)
-        self.assertEqual(len(self.trading.list_positions("sleeve_sched")), 1)
+        self.assertEqual(len(self.trading.list_positions("acct_sched")), 1)
 
     def test_outside_trading_session_is_skipped_without_force(self) -> None:
         self._create_task("sched_calendar")
@@ -114,19 +105,9 @@ def on_bar(ctx, bar):
         self.assertEqual(tick["status"], "skipped")
         self.assertEqual(tick["skip_reason"], "outside_trading_session")
         self.assertEqual(tick["orders_submitted"], 0)
-        self.assertEqual(self.trading.list_positions("sleeve_sched"), [])
+        self.assertEqual(self.trading.list_positions("acct_sched"), [])
         skipped_events = self.audit.list_events({"event_type": "scheduler_tick_skipped"})
         self.assertEqual(skipped_events[0]["reason"], "outside_trading_session")
-
-    def test_paused_sleeve_skips_tick(self) -> None:
-        self._create_task("sched_paused")
-        self.trading.set_sleeve_active("sleeve_sched", {"active": False})
-
-        tick = self.scheduler.tick_once("sched_paused", now="2026-06-10T02:00:00+00:00")
-
-        self.assertEqual(tick["status"], "skipped")
-        self.assertEqual(tick["skip_reason"], "sleeve_disabled")
-        self.assertEqual(self.trading.list_positions("sleeve_sched"), [])
 
     def test_start_and_stop_task_update_status(self) -> None:
         self._create_task("sched_loop", interval_seconds=60)
@@ -147,7 +128,6 @@ def on_bar(ctx, bar):
                 "id": task_id,
                 "name": task_id,
                 "account_id": "acct_sched",
-                "sleeve_id": "sleeve_sched",
                 "strategy_id": self.stock_strategy["id"],
                 "timing_strategy_id": self.timing_strategy["id"],
                 "data_source": "fixture",

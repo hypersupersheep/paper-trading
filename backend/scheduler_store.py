@@ -21,6 +21,57 @@ from backend.trading_store import TradingStore
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
 
+_SCHED_TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS scheduler_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    strategy_id TEXT NOT NULL,
+    timing_strategy_id TEXT,
+    data_source TEXT NOT NULL,
+    symbols TEXT NOT NULL,
+    frequency TEXT NOT NULL,
+    interval_seconds REAL NOT NULL,
+    bar_limit INTEGER NOT NULL,
+    calendar TEXT NOT NULL DEFAULT 'CN_A',
+    calendar_enabled INTEGER NOT NULL DEFAULT 1,
+    dedupe_bars INTEGER NOT NULL DEFAULT 1,
+    last_bar_key TEXT,
+    last_bar_at TEXT,
+    status TEXT NOT NULL,
+    ticks_started INTEGER NOT NULL,
+    ticks_completed INTEGER NOT NULL,
+    ticks_skipped INTEGER NOT NULL DEFAULT 0,
+    last_tick_at TEXT,
+    next_tick_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+
+_SCHED_TICKS_DDL = """
+CREATE TABLE IF NOT EXISTS scheduler_ticks (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    timing_run_id TEXT,
+    strategy_run_id TEXT,
+    decisions_recorded INTEGER NOT NULL,
+    orders_submitted INTEGER NOT NULL,
+    bar_key TEXT,
+    bar_timestamp TEXT,
+    skip_reason TEXT,
+    error TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(task_id) REFERENCES scheduler_tasks(id)
+)
+"""
+
+
 class SchedulerStore:
     def __init__(
         self,
@@ -60,58 +111,8 @@ class SchedulerStore:
 
     def _ensure_schema(self) -> None:
         with self._connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS scheduler_tasks (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    account_id TEXT NOT NULL,
-                    sleeve_id TEXT NOT NULL,
-                    strategy_id TEXT NOT NULL,
-                    timing_strategy_id TEXT,
-                    data_source TEXT NOT NULL,
-                    symbols TEXT NOT NULL,
-                    frequency TEXT NOT NULL,
-                    interval_seconds REAL NOT NULL,
-                    bar_limit INTEGER NOT NULL,
-                    calendar TEXT NOT NULL DEFAULT 'CN_A',
-                    calendar_enabled INTEGER NOT NULL DEFAULT 1,
-                    dedupe_bars INTEGER NOT NULL DEFAULT 1,
-                    last_bar_key TEXT,
-                    last_bar_at TEXT,
-                    status TEXT NOT NULL,
-                    ticks_started INTEGER NOT NULL,
-                    ticks_completed INTEGER NOT NULL,
-                    ticks_skipped INTEGER NOT NULL DEFAULT 0,
-                    last_tick_at TEXT,
-                    next_tick_at TEXT,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS scheduler_ticks (
-                    id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    finished_at TEXT,
-                    timing_run_id TEXT,
-                    strategy_run_id TEXT,
-                    decisions_recorded INTEGER NOT NULL,
-                    orders_submitted INTEGER NOT NULL,
-                    bar_key TEXT,
-                    bar_timestamp TEXT,
-                    skip_reason TEXT,
-                    error TEXT,
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    FOREIGN KEY(task_id) REFERENCES scheduler_tasks(id)
-                )
-                """
-            )
+            conn.execute(_SCHED_TASKS_DDL)
+            conn.execute(_SCHED_TICKS_DDL)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_scheduler_ticks_task
@@ -127,6 +128,39 @@ class SchedulerStore:
             self._ensure_column(conn, "scheduler_ticks", "bar_key", "TEXT")
             self._ensure_column(conn, "scheduler_ticks", "bar_timestamp", "TEXT")
             self._ensure_column(conn, "scheduler_ticks", "skip_reason", "TEXT")
+        # 老库迁移:去掉 scheduler_tasks.sleeve_id 列(列补齐并提交后再重建)。
+        # 用独立的 foreign_keys=OFF + legacy_alter_table=ON 连接:重命名时不改写
+        # scheduler_ticks 的外键引用名,删旧表也不被外键拦住;失败整体回滚。
+        self._migrate_drop_sleeve()
+
+    def _migrate_drop_sleeve(self) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            cols = [r["name"] for r in conn.execute("PRAGMA table_info(scheduler_tasks)").fetchall()]
+            if cols and "sleeve_id" in cols:
+                conn.execute("DROP TABLE IF EXISTS scheduler_tasks_legacy")
+                keep = ", ".join(c for c in cols if c != "sleeve_id")
+                conn.execute("ALTER TABLE scheduler_tasks RENAME TO scheduler_tasks_legacy")
+                conn.execute(_SCHED_TASKS_DDL)
+                conn.execute(f"INSERT INTO scheduler_tasks ({keep}) SELECT {keep} FROM scheduler_tasks_legacy")
+                conn.execute("DROP TABLE scheduler_tasks_legacy")
+            # 自愈:若 scheduler_ticks 的外键被早期半途迁移改写指向了 *_legacy(已不存在),
+            # 整表重建以恢复指向 scheduler_tasks 的正确外键。
+            refs = {r["table"] for r in conn.execute("PRAGMA foreign_key_list(scheduler_ticks)").fetchall()}
+            if any(str(t).endswith("_legacy") for t in refs):
+                tcols = [r["name"] for r in conn.execute("PRAGMA table_info(scheduler_ticks)").fetchall()]
+                keep = ", ".join(tcols)
+                conn.execute("DROP TABLE IF EXISTS scheduler_ticks_legacy")
+                conn.execute("ALTER TABLE scheduler_ticks RENAME TO scheduler_ticks_legacy")
+                conn.execute(_SCHED_TICKS_DDL)
+                conn.execute(f"INSERT INTO scheduler_ticks ({keep}) SELECT {keep} FROM scheduler_ticks_legacy")
+                conn.execute("DROP TABLE scheduler_ticks_legacy")
+            conn.commit()
+        finally:
+            conn.close()
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -143,7 +177,6 @@ class SchedulerStore:
                     "id": "sched_demo_5m",
                     "name": "Demo 5m Live Loop",
                     "account_id": "acct_a_share_alpha",
-                    "sleeve_id": "sleeve_value_5m",
                     "strategy_id": "strategy_demo_momentum",
                     "timing_strategy_id": "timing_demo_regime",
                     "data_source": "fixture",
@@ -159,15 +192,11 @@ class SchedulerStore:
 
     def create_task(self, payload: dict[str, Any], *, seed: bool = False) -> dict[str, Any]:
         account_id = _required(payload, "account_id")
-        sleeve_id = _required(payload, "sleeve_id")
         strategy_id = _required(payload, "strategy_id")
         timing_strategy_id = payload.get("timing_strategy_id") or None
         account = self.trading_store.get_account(account_id)
-        sleeve = self.trading_store.get_sleeve(sleeve_id)
         if not account:
             raise ValueError(f"unknown account_id: {account_id}")
-        if not sleeve or sleeve["account_id"] != account_id:
-            raise ValueError(f"sleeve_id {sleeve_id} does not belong to account {account_id}")
         if not self.strategy_store.get_strategy(strategy_id):
             raise ValueError(f"unknown strategy_id: {strategy_id}")
         if timing_strategy_id and not self.timing_store.get_timing_strategy(str(timing_strategy_id)):
@@ -191,7 +220,6 @@ class SchedulerStore:
             "id": task_id,
             "name": payload.get("name") or f"{strategy_id} live loop",
             "account_id": account_id,
-            "sleeve_id": sleeve_id,
             "strategy_id": strategy_id,
             "timing_strategy_id": timing_strategy_id,
             "data_source": (payload.get("data_source") or app_settings.default_data_source()).lower(),
@@ -218,20 +246,19 @@ class SchedulerStore:
             conn.execute(
                 """
                 INSERT INTO scheduler_tasks (
-                    id, name, account_id, sleeve_id, strategy_id, timing_strategy_id,
+                    id, name, account_id, strategy_id, timing_strategy_id,
                     data_source, symbols, frequency, interval_seconds, bar_limit,
                     calendar, calendar_enabled, dedupe_bars, last_bar_key,
                     last_bar_at, status, ticks_started, ticks_completed,
                     ticks_skipped, last_tick_at, next_tick_at, last_error,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task["id"],
                     task["name"],
                     task["account_id"],
-                    task["sleeve_id"],
                     task["strategy_id"],
                     task["timing_strategy_id"],
                     task["data_source"],
@@ -262,7 +289,6 @@ class SchedulerStore:
                 {
                     "strategy_id": strategy_id,
                     "account_id": account_id,
-                    "sleeve_id": sleeve_id,
                     "active": True,
                 },
             )
@@ -274,7 +300,6 @@ class SchedulerStore:
                     ledger_type="system",
                     event_type="scheduler_task_created",
                     account_id=account_id,
-                    sleeve_id=sleeve_id,
                     strategy_id=strategy_id,
                     reason="live scheduler task created",
                     metadata={
@@ -334,7 +359,6 @@ class SchedulerStore:
                     ledger_type="system",
                     event_type="scheduler_task_started",
                     account_id=task["account_id"],
-                    sleeve_id=task["sleeve_id"],
                     strategy_id=task["strategy_id"],
                     reason="live scheduler task started",
                     metadata={"task_id": task_id, "interval_seconds": task["interval_seconds"]},
@@ -362,7 +386,6 @@ class SchedulerStore:
                 ledger_type="system",
                 event_type="scheduler_task_stopped",
                 account_id=task["account_id"],
-                sleeve_id=task["sleeve_id"],
                 strategy_id=task["strategy_id"],
                 reason="live scheduler task stopped",
                 metadata={"task_id": task_id},
@@ -384,7 +407,6 @@ class SchedulerStore:
                 ledger_type="system",
                 event_type="scheduler_tick_started",
                 account_id=task["account_id"],
-                sleeve_id=task["sleeve_id"],
                 strategy_id=task["strategy_id"],
                 run_id=tick_id,
                 reason="live scheduler tick started",
@@ -414,17 +436,6 @@ class SchedulerStore:
                     metadata={"calendar": calendar_status},
                 )
 
-            sleeve = self.trading_store.get_sleeve(task["sleeve_id"])
-            if sleeve and not sleeve.get("active", True):
-                # 策略被停用时调度照常轮询, 但不执行, 留下 skipped 记录方便复盘。
-                return self._skip_tick(
-                    task,
-                    tick_id,
-                    started_at,
-                    reason="sleeve_disabled",
-                    metadata={"sleeve_id": task["sleeve_id"]},
-                )
-
             bar_snapshot = self._bar_snapshot(task)
             if task.get("dedupe_bars") and task.get("last_bar_key") == bar_snapshot["bar_key"]:
                 return self._skip_tick(
@@ -442,7 +453,6 @@ class SchedulerStore:
                     task["timing_strategy_id"],
                     {
                         "account_id": task["account_id"],
-                        "sleeve_id": task["sleeve_id"],
                         "strategy_id": task["strategy_id"],
                         "data_source": task["data_source"],
                         "symbols": task["symbols"],
@@ -461,7 +471,6 @@ class SchedulerStore:
                 task["strategy_id"],
                 {
                     "account_id": task["account_id"],
-                    "sleeve_id": task["sleeve_id"],
                     "data_source": task["data_source"],
                     "symbols": task["symbols"],
                     "frequency": task["frequency"],
@@ -504,7 +513,6 @@ class SchedulerStore:
                     ledger_type="system",
                     event_type="scheduler_tick_completed",
                     account_id=task["account_id"],
-                    sleeve_id=task["sleeve_id"],
                     strategy_id=task["strategy_id"],
                     run_id=tick_id,
                     reason="live scheduler tick completed",
@@ -542,7 +550,6 @@ class SchedulerStore:
                     ledger_type="system",
                     event_type="scheduler_tick_failed",
                     account_id=task["account_id"],
-                    sleeve_id=task["sleeve_id"],
                     strategy_id=task["strategy_id"],
                     run_id=tick_id,
                     reason=error,
@@ -612,7 +619,6 @@ class SchedulerStore:
                 ledger_type="system",
                 event_type="scheduler_tick_skipped",
                 account_id=task["account_id"],
-                sleeve_id=task["sleeve_id"],
                 strategy_id=task["strategy_id"],
                 run_id=tick_id,
                 reason=reason,

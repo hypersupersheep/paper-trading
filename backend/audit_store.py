@@ -17,7 +17,6 @@ AUDIT_FIELDS = [
     "timestamp",
     "ledger_type",
     "account_id",
-    "sleeve_id",
     "strategy_id",
     "run_id",
     "event_type",
@@ -50,7 +49,6 @@ class AuditEvent:
     ledger_type: str
     event_type: str
     account_id: str
-    sleeve_id: str | None = None
     strategy_id: str | None = None
     run_id: str | None = None
     symbol: str | None = None
@@ -153,18 +151,17 @@ class AuditStore:
             conn.execute(
                 """
                 INSERT INTO audit_events (
-                    id, timestamp, ledger_type, account_id, sleeve_id, strategy_id,
+                    id, timestamp, ledger_type, account_id, strategy_id,
                     run_id, event_type, symbol, amount, quantity, price, before_state,
                     after_state, reason, source_event_id, metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
                     timestamp,
                     event.ledger_type,
                     event.account_id,
-                    event.sleeve_id,
                     event.strategy_id,
                     event.run_id,
                     event.event_type,
@@ -185,7 +182,6 @@ class AuditStore:
         self,
         *,
         account_id: str,
-        sleeve_id: str,
         strategy_id: str,
         run_id: str,
         symbol: str,
@@ -219,7 +215,6 @@ class AuditStore:
                 ledger_type="trade",
                 event_type="trade_filled",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -250,7 +245,6 @@ class AuditStore:
                     ledger_type="cash",
                     event_type=event_type,
                     account_id=account_id,
-                    sleeve_id=sleeve_id,
                     strategy_id=strategy_id,
                     run_id=run_id,
                     symbol=symbol,
@@ -269,7 +263,6 @@ class AuditStore:
                 ledger_type="position",
                 event_type="position_update",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -290,7 +283,6 @@ class AuditStore:
                 ledger_type="portfolio_snapshot",
                 event_type="portfolio_snapshot",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol=symbol,
@@ -360,8 +352,8 @@ class AuditStore:
         )
         return ids
 
-    def net_position_asof(self, account_id: str, sleeve_id: str, symbol: str, as_of_ts: str) -> int:
-        """按成交事件时序重建该 (账户, sleeve, 标的) 截至 as_of_ts(含)的净持仓股数。
+    def net_position_asof(self, account_id: str, symbol: str, as_of_ts: str) -> int:
+        """按成交事件时序重建该 (账户, 标的) 截至 as_of_ts(含)的净持仓股数。
 
         用于补录卖出的时序校验:不能卖出"该交易日当时还没买入"的量。
         """
@@ -371,9 +363,9 @@ class AuditStore:
                 SELECT quantity, json_extract(metadata, '$.side') AS side
                 FROM audit_events
                 WHERE ledger_type = 'trade' AND event_type = 'trade_filled'
-                  AND account_id = ? AND sleeve_id = ? AND symbol = ? AND timestamp <= ?
+                  AND account_id = ? AND symbol = ? AND timestamp <= ?
                 """,
-                (account_id, sleeve_id, symbol, as_of_ts),
+                (account_id, symbol, as_of_ts),
             ).fetchall()
         qty = 0
         for row in rows:
@@ -386,7 +378,7 @@ class AuditStore:
         clauses: list[str] = []
         params: list[Any] = []
 
-        for field in ("ledger_type", "account_id", "sleeve_id", "strategy_id", "run_id", "symbol", "event_type"):
+        for field in ("ledger_type", "account_id", "strategy_id", "run_id", "symbol", "event_type"):
             value = filters.get(field)
             if value:
                 clauses.append(f"{field} = ?")
@@ -544,7 +536,6 @@ class AuditStore:
                         "root_id": root,
                         "timestamp": trade["timestamp"],
                         "account_id": trade.get("account_id"),
-                        "sleeve_id": trade.get("sleeve_id"),
                         "strategy_id": trade.get("strategy_id"),
                         "symbol": trade.get("symbol"),
                         "name": names.resolve(trade.get("symbol") or ""),
@@ -581,7 +572,6 @@ class AuditStore:
                         "root_id": root,
                         "timestamp": headline["timestamp"],
                         "account_id": headline.get("account_id"),
-                        "sleeve_id": headline.get("sleeve_id"),
                         "strategy_id": headline.get("strategy_id"),
                         "symbol": symbol,
                         "name": names.resolve(symbol) if symbol else "",
@@ -672,7 +662,6 @@ class AuditStore:
             return
 
         account_id = "acct_a_share_alpha"
-        sleeve_id = "sleeve_value_5m"
         strategy_id = "strategy_value_rotation"
         run_id = "run_20260610_0930"
         source_signal = "sig_600519_buy_0930"
@@ -686,7 +675,6 @@ class AuditStore:
                 ledger_type="decision",
                 event_type="strategy_signal",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol="600519.SH",
@@ -702,7 +690,6 @@ class AuditStore:
                 ledger_type="decision",
                 event_type="timing_decision",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id="timing_market_regime",
                 run_id=run_id,
                 symbol="600519.SH",
@@ -718,7 +705,6 @@ class AuditStore:
                 ledger_type="order",
                 event_type="order_submitted",
                 account_id=account_id,
-                sleeve_id=sleeve_id,
                 strategy_id=strategy_id,
                 run_id=run_id,
                 symbol="600519.SH",
@@ -732,7 +718,6 @@ class AuditStore:
         )
         self.record_trade_settlement(
             account_id=account_id,
-            sleeve_id=sleeve_id,
             strategy_id=strategy_id,
             run_id=run_id,
             symbol="600519.SH",
@@ -766,7 +751,6 @@ class AuditStore:
                 ledger_type="decision",
                 event_type="strategy_signal",
                 account_id=account_id,
-                sleeve_id="sleeve_growth_5m",
                 strategy_id="strategy_growth_breakout",
                 run_id="run_20260610_0945",
                 symbol="000858.SZ",
@@ -782,7 +766,6 @@ class AuditStore:
                 ledger_type="decision",
                 event_type="timing_blocked",
                 account_id=account_id,
-                sleeve_id="sleeve_growth_5m",
                 strategy_id="timing_market_regime",
                 run_id="run_20260610_0945",
                 symbol="000858.SZ",
@@ -799,7 +782,6 @@ class AuditStore:
                 ledger_type="order",
                 event_type="order_rejected",
                 account_id=account_id,
-                sleeve_id="sleeve_growth_5m",
                 strategy_id="strategy_growth_breakout",
                 run_id="run_20260610_0945",
                 symbol="000858.SZ",

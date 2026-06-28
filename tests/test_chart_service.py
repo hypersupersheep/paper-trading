@@ -18,15 +18,6 @@ class ChartServiceTest(unittest.TestCase):
         self.trading = TradingStore(self.db_path, self.audit)
         self.charts = ChartService(self.audit, DataConnectorRegistry())
         self.trading.create_account({"id": "acct_chart", "name": "Chart Account", "initial_cash": 500_000})
-        self.trading.create_sleeve(
-            "acct_chart",
-            {
-                "id": "sleeve_chart",
-                "name": "Chart Sleeve",
-                "strategy_id": "strategy_chart",
-                "allocated_cash": 300_000,
-            },
-        )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -45,7 +36,6 @@ class ChartServiceTest(unittest.TestCase):
         order = self.trading.place_order(
             {
                 "account_id": "acct_chart",
-                "sleeve_id": "sleeve_chart",
                 "strategy_id": "strategy_chart",
                 "run_id": "run_chart",
                 "symbol": "000001.SZ",

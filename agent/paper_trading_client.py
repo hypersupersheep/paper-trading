@@ -81,7 +81,7 @@ class PaperTradingClient:
             )
         return meta
 
-    # ------------------------------ 账户/sleeve ------------------------------ #
+    # ------------------------------ 账户 ------------------------------ #
     def list_accounts(self) -> list[dict]:
         return self._get("/api/accounts")["accounts"]
 
@@ -92,26 +92,9 @@ class PaperTradingClient:
         """删除账户及其全部子数据。账户仍有持仓时需 force=True 才强删。"""
         return self._post(f"/api/accounts/{account_id}/delete", {"force": force})
 
-    def create_sleeve(self, account_id: str, name: str, strategy_id: str, allocated_cash: float) -> dict:
-        return self._post(
-            f"/api/accounts/{account_id}/sleeves",
-            {"name": name, "strategy_id": strategy_id, "allocated_cash": allocated_cash},
-        )["sleeve"]
-
-    def set_sleeve_active(self, sleeve_id: str, active: bool) -> dict:
-        return self._post(f"/api/sleeves/{sleeve_id}/active", {"active": active})["sleeve"]
-
-    def adjust_sleeve_allocation(self, sleeve_id: str, percent: float | None = None, allocated_cash: float | None = None) -> dict:
-        body: dict = {}
-        if percent is not None:
-            body["percent"] = percent
-        if allocated_cash is not None:
-            body["allocated_cash"] = allocated_cash
-        return self._post(f"/api/sleeves/{sleeve_id}/allocation", body)["sleeve"]
-
     # ------------------------------ 模拟券商 ------------------------------ #
-    def place_order(self, account_id: str, sleeve_id: str, symbol: str, side: str, quantity: int, **opts: Any) -> dict:
-        body = {"account_id": account_id, "sleeve_id": sleeve_id, "symbol": symbol, "side": side, "quantity": quantity}
+    def place_order(self, account_id: str, symbol: str, side: str, quantity: int, **opts: Any) -> dict:
+        body = {"account_id": account_id, "symbol": symbol, "side": side, "quantity": quantity}
         body.update(opts)
         return self._post("/api/broker/orders", body)
 
@@ -126,13 +109,10 @@ class PaperTradingClient:
         quantity: int,
         price: float,
         trade_date: str,
-        *,
-        sleeve_id: str | None = None,
         **opts: Any,
     ) -> dict:
         """交易历史补充:补录此前未记录的真实历史成交(symbol/price/side/quantity/trade_date 必填)。
 
-        sleeve_id 可省略——不传则落到账户默认 sleeve(没有就自动建"主仓"),单账户补录无需关心 sleeve。
         绕过择时/风控门控,但保持账本一致。仅用于补历史,不要用它造正常交易。
         opts 可带 trade_time(HH:MM)、apply_fees(默认 True)、note。
         """
@@ -144,8 +124,6 @@ class PaperTradingClient:
             "price": price,
             "trade_date": trade_date,
         }
-        if sleeve_id:
-            body["sleeve_id"] = sleeve_id
         body.update(opts)
         return self._post("/api/broker/backfill", body)
 
@@ -159,8 +137,8 @@ class PaperTradingClient:
     def import_strategy(self, name: str, code: str, source_filename: str | None = None) -> dict:
         return self._post("/api/strategies", {"name": name, "code": code, "source_filename": source_filename})
 
-    def run_strategy(self, strategy_id: str, account_id: str, sleeve_id: str, **opts: Any) -> dict:
-        body = {"account_id": account_id, "sleeve_id": sleeve_id, **opts}
+    def run_strategy(self, strategy_id: str, account_id: str, **opts: Any) -> dict:
+        body = {"account_id": account_id, **opts}
         return self._post(f"/api/strategies/{strategy_id}/run", body)
 
     def delete_strategy(self, strategy_id: str) -> dict:
@@ -173,10 +151,10 @@ class PaperTradingClient:
     def import_timing_strategy(self, name: str, code: str) -> dict:
         return self._post("/api/timing-strategies", {"name": name, "code": code})
 
-    def bind_timing(self, timing_strategy_id: str, strategy_id: str, account_id: str, sleeve_id: str | None = None) -> dict:
+    def bind_timing(self, timing_strategy_id: str, strategy_id: str, account_id: str) -> dict:
         return self._post(
             f"/api/timing-strategies/{timing_strategy_id}/bind",
-            {"strategy_id": strategy_id, "account_id": account_id, "sleeve_id": sleeve_id, "active": True},
+            {"strategy_id": strategy_id, "account_id": account_id, "active": True},
         )["binding"]
 
     def delete_timing_strategy(self, timing_strategy_id: str) -> dict:
@@ -253,8 +231,8 @@ class PaperTradingClient:
         return self._get("/api/quotes", symbols=symbols, data_source=data_source, frequency=frequency)["quotes"]
 
     # ------------------------------ 风控 ------------------------------ #
-    def set_risk_config(self, account_id: str, sleeve_id: str | None = None, **limits: Any) -> dict:
-        return self._post("/api/risk/configs", {"account_id": account_id, "sleeve_id": sleeve_id, **limits})["config"]
+    def set_risk_config(self, account_id: str, **limits: Any) -> dict:
+        return self._post("/api/risk/configs", {"account_id": account_id, **limits})["config"]
 
     def list_risk_configs(self, account_id: str | None = None) -> list[dict]:
         return self._get("/api/risk/configs", account_id=account_id)["configs"]

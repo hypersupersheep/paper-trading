@@ -18,15 +18,6 @@ class StrategyStoreTest(unittest.TestCase):
         self.trading = TradingStore(self.db_path, self.audit)
         self.strategy_store = StrategyStore(self.db_path, self.audit, self.trading, root / "strategies")
         self.trading.create_account({"id": "acct_strategy", "name": "Strategy Account", "initial_cash": 1_000_000})
-        self.trading.create_sleeve(
-            "acct_strategy",
-            {
-                "id": "sleeve_strategy",
-                "name": "Strategy Sleeve",
-                "strategy_id": "strategy_test",
-                "allocated_cash": 500_000,
-            },
-        )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -64,7 +55,6 @@ def on_bar(ctx, bar):
             strategy["id"],
             {
                 "account_id": "acct_strategy",
-                "sleeve_id": "sleeve_strategy",
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "data_source": "fixture",
@@ -74,7 +64,7 @@ def on_bar(ctx, bar):
 
         self.assertEqual(result["status"], "completed")
         self.assertGreater(result["orders_submitted"], 0)
-        positions = self.trading.list_positions("sleeve_strategy")
+        positions = self.trading.list_positions("acct_strategy")
         self.assertEqual(positions[0]["symbol"], "000001.SZ")
         self.assertGreater(positions[0]["quantity"], 0)
         chain = self.audit.get_chain(result["source_event_ids"][0])
@@ -82,25 +72,6 @@ def on_bar(ctx, bar):
         self.assertEqual(chain["trade"]["event_type"], "trade_filled")
         started = self.audit.list_events({"event_type": "strategy_run_started"})[0]
         self.assertEqual(started["metadata"]["connector"]["name"], "fixture")
-
-    def test_paused_sleeve_refuses_strategy_run(self) -> None:
-        strategy = self.strategy_store.create_strategy(
-            {
-                "id": "strategy_paused_run",
-                "name": "Paused Run",
-                "code": """
-def on_bar(ctx, bar):
-    pass
-""",
-            }
-        )
-        self.trading.set_sleeve_active("sleeve_strategy", {"active": False})
-
-        with self.assertRaisesRegex(ValueError, "已停用"):
-            self.strategy_store.run_strategy(
-                strategy["id"],
-                {"account_id": "acct_strategy", "sleeve_id": "sleeve_strategy", "bar_limit": 2},
-            )
 
     def test_unknown_data_source_is_rejected(self) -> None:
         strategy = self.strategy_store.create_strategy(
@@ -119,7 +90,6 @@ def on_bar(ctx, bar):
                 strategy["id"],
                 {
                     "account_id": "acct_strategy",
-                    "sleeve_id": "sleeve_strategy",
                     "symbols": "000001.SZ",
                     "frequency": "5m",
                     "data_source": "missing",
@@ -143,7 +113,6 @@ def on_bar(ctx, bar):
             strategy["id"],
             {
                 "account_id": "acct_strategy",
-                "sleeve_id": "sleeve_strategy",
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,

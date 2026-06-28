@@ -1,6 +1,6 @@
 ---
 name: paper-trading
-description: Drive the 量化模拟盘(A-share paper trading) system via its local REST API. Use when an agent needs to import/run stock or timing strategies, place simulated orders, run isolated backtests over a date range, read performance tearsheets (Sharpe/drawdown/win-rate vs 沪深300), manage watchlists/accounts/sleeves, trace audit chains, or self-review a strategy's backtest and iterate. Talks to a locally running server (default http://127.0.0.1:8000); does NOT connect to a real broker.
+description: Drive the 量化模拟盘(A-share paper trading) system via its local REST API. Use when an agent needs to import/run stock or timing strategies, place simulated orders, run isolated backtests over a date range, read performance tearsheets (Sharpe/drawdown/win-rate vs 沪深300), manage watchlists/accounts, trace audit chains, or self-review a strategy's backtest and iterate. Talks to a locally running server (default http://127.0.0.1:8000); does NOT connect to a real broker.
 ---
 
 # Paper Trading(量化模拟盘) Agent Skill
@@ -11,7 +11,7 @@ Drive a local A-share **paper trading** system. It simulates strategies like liv
 
 - **Local only**: server runs at `http://127.0.0.1:8000` (override with `--base-url` or `PAPER_TRADING_URL`). Start it with `python3 -m backend.server` from the app directory.
 - **Simulation, not real money**: orders go to a paper broker. Friction defaults: commission 万0.8 (0.00008, both sides), stamp duty 千1 (0.001, sell only), **adaptive slippage** (square-root market-impact model `η·σ·√(order/ADV)`, applied in both backtest and live). All friction is per-account/per-backtest overridable (`slippage_model` can be `adaptive`/`bps`/`fixed_tick`). A-share 100-share lots; T+1 in backtests.
-- **Sleeve is optional for trading/backfill**: `sleeve_id` can be omitted — the system uses the account's default sleeve, or auto-creates a "主仓" one. Only create/specify sleeves when you actually run multiple strategies in one account (sleeve = per-strategy capital bucket + P&L attribution).
+- **Single cash pool per account**: each account holds one cash balance and one set of positions — no capital sub-units. Run one strategy per account, or several against the shared pool.
 - **Discover first**: `GET /api/meta` returns version, `api_version`, `data_home`, data sources, and a capabilities map. Always check it before acting (the SDK's `check_compatible()` does this).
 - **Data isolation**: all writable data lives under `PAPER_TRADING_HOME` (default = app dir). Each user/instance can have its own.
 - **Data sources**: `fixture`(synthetic, for testing), `tongdaxin`(realtime A-share via mootdx), `ricequant`(米筐 rqdatac, best for historical date ranges), `wind`(辉隆 Wind read-only MySQL, daily only, needs内网 VPN). Historical backtests need a real source with the date range; `fixture` works for any range but is synthetic.
@@ -88,21 +88,20 @@ The review is intentionally opinionated so even a general agent gets a structure
 
 ## What the system can do (capabilities)
 
-Accounts & sleeves (multi-strategy capital units), paper broker (market/limit orders, one-click close), **pre-trade risk gate** (per-account/sleeve limits → rejects + audit), stock + timing strategies (auto-adapted), scheduler (replay loop), **isolated backtest** (date range, friction, benchmark), **performance tearsheet** (cumulative/annualized/Sharpe/max-drawdown/Calmar/win-rate, + relative vs 沪深300: excess/Beta/alpha/info-ratio), watchlist, full **audit chain** (signal → timing → risk → order → fill → cash → position → equity), CSV/JSON export.
+Accounts (single cash pool each), paper broker (market/limit orders, one-click close), **pre-trade risk gate** (per-account limits → rejects + audit), stock + timing strategies (auto-adapted), scheduler (replay loop), **isolated backtest** (date range, friction, benchmark), **performance tearsheet** (cumulative/annualized/Sharpe/max-drawdown/Calmar/win-rate, + relative vs 沪深300: excess/Beta/alpha/info-ratio), watchlist, full **audit chain** (signal → timing → risk → order → fill → cash → position → equity), CSV/JSON export.
 
 ## Key API endpoints (for direct HTTP if not using the SDK)
 
 ```
 GET  /api/meta                         能力发现(先调这个)
 GET|POST /api/accounts                 账户
-POST /api/accounts/{id}/delete         删除账户(有持仓需 {"force":true};连带清 sleeve/持仓/订单)
+POST /api/accounts/{id}/delete         删除账户(有持仓需 {"force":true};连带清持仓/订单)
 POST /api/accounts/{id}/description    策略描述文字(手动/AI);GET 返回 {description,files[]};文件 POST/GET /api/accounts/{id}/files、GET .../files/{fid}(原始字节)、.../files/{fid}/delete(pdf/word/excel/md,≤25MB);summary.accounts[] 也带 description
 POST /api/accounts/{id}/update         更新账户配置(name/owner/commission_rate/stamp_duty_rate/slippage_model/slippage_value/reverse_repo_annual_rate;**initial_cash 不可改**;只对之后成交生效)
 GET|POST /api/admin-link               Admin 对接配置(admin_url/admin_token/node_name/base_url;opt-in,配了才登记;token 不回明文)
 POST /api/admin-link/register-all      把本机现有全部账户登记到 Admin(Admin 上线后补登)
 GET  /api/stream                       SSE 事件流(trade_filled / order_rejected / reverse_repo / account_created / account_deleted;远程需 X-Admin-Token=node.token,本机免)
 # 账户带 owner(交易员)字段;配了 admin_url 后,开户/改配置自动 POST register(单条),删账户自动 POST 注销,启动批量补登(accounts:[]);幂等 best-effort 不影响本地
-POST /api/accounts/{id}/sleeves        资金单元
 POST /api/broker/orders                下单
 POST /api/broker/backfill              交易历史补充(补录历史成交,见下文)
 GET|POST /api/strategies               选股策略(POST=导入)
@@ -129,22 +128,22 @@ GET  /api/data/connectors/health       数据源状态
 
 ## Trade backfill 交易历史补充 (补录历史成交)
 
-Only for recording **real historical trades that the system never logged** — not for normal trading. It bypasses the timing/risk/sleeve gates (the trade already happened, it's not a new decision) but still keeps the ledger consistent (cash, position quantity, avg cost) and tags every entry as a backfill on the audit chain.
+Only for recording **real historical trades that the system never logged** — not for normal trading. It bypasses the timing/risk gates (the trade already happened, it's not a new decision) but still keeps the ledger consistent (cash, position quantity, avg cost) and tags every entry as a backfill on the audit chain.
 
 - **Strictly required**: `symbol`, `price`, `side`, `quantity`, `trade_date` (`YYYY-MM-DD`, at least date-level). Missing any → rejected.
 - Optional: `trade_time` (`HH:MM`), `apply_fees` (default true → applies commission + stamp duty, no slippage), `note`.
-- Consistency (enforced): a SELL is validated against the position **held as of its own `trade_date`** (reconstructed from prior fills by timestamp), not the current live position — so backfill the matching BUY *first, with an earlier/equal date*, or the SELL is rejected. A BUY needs sufficient sleeve cash.
+- Consistency (enforced): a SELL is validated against the position **held as of its own `trade_date`** (reconstructed from prior fills by timestamp), not the current live position — so backfill the matching BUY *first, with an earlier/equal date*, or the SELL is rejected. A BUY needs sufficient account cash.
 - Price sanity (enforced): a fill `price` deviating >2.5x or <0.4x from that day's market close is rejected as a likely typo (skipped only if no market data is reachable). Same as-of-date chronology check also guards `place_order` whenever you pass an explicit `timestamp` (backdated orders) — you cannot sell what wasn't yet held at that time.
 - Do **not** use this to fabricate normal trades — only to fill gaps. For live paper trading use `place_order`; for what-if testing use backtest.
 
 ```bash
 python3 agent/cli.py backfill \
-  --account-id acct_x --sleeve-id sleeve_x \
+  --account-id acct_x \
   --symbol 600519.SH --side BUY --quantity 200 --price 1500 \
   --date 2024-02-05 --note "历史漏记的建仓"
 ```
 
-SDK: `pt.backfill_trade(account_id, sleeve_id, symbol, side, quantity, price, trade_date, trade_time=..., apply_fees=..., note=...)`. HTTP: `POST /api/broker/backfill`.
+SDK: `pt.backfill_trade(account_id, symbol, side, quantity, price, trade_date, trade_time=..., apply_fees=..., note=...)`. HTTP: `POST /api/broker/backfill`.
 
 ## Conventions & gotchas
 
