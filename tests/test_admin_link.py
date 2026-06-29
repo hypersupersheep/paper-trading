@@ -110,6 +110,17 @@ class AdminLinkTest(unittest.TestCase):
         self.admin_link.save({"admin_url": "http://a:9000", "admin_token": ""})  # 留空=不改
         self.assertTrue(self.admin_link.public_view()["has_token"])
 
+    def test_non_ascii_node_id_regenerated_to_valid(self) -> None:
+        # 中文主机名旧 bug:isalnum() 对中文为 True → node_id 带中文 → Admin 登记 400。
+        self.admin_link.save({"node_id": "枫兮-7995a5"})
+        nid = self.admin_link.node_id()
+        self.assertRegex(nid, r"^[A-Za-z0-9._-]{1,64}$")  # Admin 口径:仅 ASCII 字母数字 . _ -
+        self.assertNotIn("枫", nid)
+        # 重生后落盘并稳定(再读不变)。
+        self.assertEqual(self.admin_link.node_id(), nid)
+        # 登记报文 node 段用的也是这个合法 id。
+        self.assertEqual(self.admin_link.node_descriptor(8000)["id"], nid)
+
 
 if __name__ == "__main__":
     unittest.main()

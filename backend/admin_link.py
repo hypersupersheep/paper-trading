@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import socket
 import time
@@ -69,16 +70,27 @@ def save(updates: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+# Admin 要求节点/账户 id 仅含 [A-Za-z0-9._-] 且 ≤64 字符。
+_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
 def node_id() -> str:
-    """稳定节点 id:已有则用,没有则生成并落盘。"""
+    """稳定节点 id:已有且合法则用;缺失或含非法字符(如中文主机名)则重新生成合法的并落盘。"""
     data = load()
-    if data.get("node_id"):
-        return data["node_id"]
-    return save({})["node_id"]
+    nid = data.get("node_id")
+    if nid and _ID_RE.fullmatch(nid):
+        return nid
+    # 旧版用 isalnum() 过滤主机名,但中文 isalnum()=True → node_id 带中文 → Admin 登记 400。
+    # 这里强制重生一个 ASCII 合法 id 落盘(老库自愈)。
+    return save({"node_id": _new_node_id()})["node_id"]
 
 
 def _new_node_id() -> str:
-    host = "".join(c for c in socket.gethostname().split(".")[0] if c.isalnum() or c in "-_")[:24] or "node"
+    # 只保留 ASCII 字母数字 + - _(注意:中文等 Unicode 字母 isalnum() 也为 True,故须加 isascii()）。
+    host = "".join(
+        c for c in socket.gethostname().split(".")[0]
+        if (c.isascii() and c.isalnum()) or c in "-_"
+    )[:24] or "node"
     return f"{host}-{uuid.uuid4().hex[:6]}"
 
 
