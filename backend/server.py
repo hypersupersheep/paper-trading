@@ -1198,7 +1198,28 @@ def run() -> None:
     # 0.0.0.0 让老板机能连上(远程已强制 node.token 鉴权,安全);纯本地未对接则仍只听 127.0.0.1。
     # 这样同事下载即用,无需手动配 HOST。
     host = admin_link.bind_host(os.environ.get("HOST"))
-    server = ThreadingHTTPServer((host, port), AuditRequestHandler)
+    # 绑定回退:对接 Admin 时默认监听 0.0.0.0(全网卡),但部分机器的防火墙/安全软件会拦截
+    # 未签名 app 监听全网卡,bind() 直接报错 → app 永远起不来(卡"正在启动本地引擎")。
+    # 这里捕获绑定失败并回退到只听 127.0.0.1,保证 app 一定能起;局域网/Admin 可达是次要的。
+    try:
+        server = ThreadingHTTPServer((host, port), AuditRequestHandler)
+    except OSError as exc:
+        if host == "127.0.0.1":
+            raise
+        fallback_note = (
+            f"监听 {host}:{port} 失败({exc});已回退到只听 127.0.0.1。"
+            f"原因通常是防火墙/安全软件拦截未签名 app 监听全部网卡。"
+            f"老板机 Admin 若要轮询到本节点,需在系统里允许本 app 接受网络连接后重启。"
+        )
+        print(f"  [warn] {fallback_note}")
+        try:
+            (paths.home() / "startup_error.log").write_text(
+                f"[{datetime.now(timezone.utc).isoformat()}] {fallback_note}\n", encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001 - 日志写不了不影响回退启动
+            pass
+        host = "127.0.0.1"
+        server = ThreadingHTTPServer((host, port), AuditRequestHandler)
     print(f"{APP_NAME} v{__version__} (api v{API_VERSION})")
     print(f"  数据目录: {paths.home()}")
     bind_note = "局域网可达(已对接 Admin,远程需 node.token)" if host == "0.0.0.0" else "仅本机"

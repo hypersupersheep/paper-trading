@@ -79,9 +79,30 @@ def _wait_until_ready(port: int, timeout: float = 30.0) -> bool:
 
 
 def _run_server() -> None:
-    from backend.server import run
+    # 服务跑在 daemon 线程里;之前这里没有兜底——run() 一抛异常线程就静默死掉,
+    # 打包 app 没终端,表现为永远卡在"正在启动本地引擎"。这里把致命异常落盘到数据目录的
+    # startup_error.log(同时打到 stderr,PT_NO_WINDOW 模式可见),让启动失败可诊断、可上报。
+    try:
+        from backend.server import run
 
-    run()
+        run()
+    except BaseException:  # noqa: BLE001 - 启动期任何异常都要留痕,否则用户只看到无限 splash
+        import datetime
+        import traceback
+
+        tb = traceback.format_exc()
+        sys.stderr.write(tb)
+        try:
+            from backend import paths
+
+            log_path = paths.home() / "startup_error.log"
+            log_path.write_text(
+                f"[{datetime.datetime.now().isoformat()}] paper-trading 引擎启动失败:\n{tb}\n",
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001 - 连日志都写不了就算了,至少 stderr 有
+            pass
+        raise
 
 
 def main() -> int:
