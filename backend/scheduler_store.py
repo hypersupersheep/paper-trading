@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from backend import app_settings
 from backend.audit_store import AuditEvent, AuditStore
@@ -18,7 +17,8 @@ from backend.timing_store import TimingStore
 from backend.trading_store import TradingStore
 
 
-CN_TZ = ZoneInfo("Asia/Shanghai")
+# 固定 UTC+8(与 trading_store 一致,避免依赖系统时区库/tzdata,见 risk_store 说明)。
+CN_TZ = timezone(timedelta(hours=8))
 
 
 _SCHED_TASKS_DDL = """

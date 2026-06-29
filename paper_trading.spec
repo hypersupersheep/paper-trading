@@ -54,6 +54,16 @@ else:
         _binaries += _b
         _hiddenimports += _h
 
+# tzdata:zoneinfo 在「缺系统时区库」的机器上的纯数据后备。zoneinfo 是惰性 import tzdata,
+# PyInstaller 静态分析看不到,默认不打包 → 这类机器上 ZoneInfo("Asia/Shanghai") 直接
+# ZoneInfoNotFoundError 让 app 起不来。我们自己的代码已改用固定 UTC+8 不再依赖它,但 pandas/
+# rqdatac 等运行时可能用 zoneinfo,故无论 lean/full 都把 tzdata 打进来兜底(装了才打)。
+if importlib.util.find_spec("tzdata") is not None:
+    _td, _tb, _th = collect_all("tzdata")
+    _datas += _td
+    _binaries += _tb
+    _hiddenimports += _th + ["tzdata"]
+
 a = Analysis(
     ["launcher.py"],
     pathex=[],
@@ -113,8 +123,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "PaperTrading",
             "CFBundleDisplayName": "量化模拟盘",
-            "CFBundleShortVersionString": "1.15.2",
-            "CFBundleVersion": "1.15.2",
+            "CFBundleShortVersionString": "1.15.3",
+            "CFBundleVersion": "1.15.3",
             "NSHighResolutionCapable": True,
         },
     )

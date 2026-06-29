@@ -3,15 +3,17 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from backend.audit_store import AuditEvent, AuditStore
 
 
-CN_TZ = ZoneInfo("Asia/Shanghai")
+# 固定 UTC+8(与 trading_store 一致):中国大陆自 1991 年起恒为 +8、无夏令时,
+# 用固定偏移而非 ZoneInfo("Asia/Shanghai") 可彻底摆脱对系统时区库/tzdata 包的依赖
+# (打包后在缺系统时区库的机器上 ZoneInfo 会 ZoneInfoNotFoundError 崩溃)。
+CN_TZ = timezone(timedelta(hours=8))
 
 # 限额字段统一在这里声明：API、merge、前端字段保持一致，新增规则只需扩展此表。
 RISK_LIMIT_FIELDS = [
