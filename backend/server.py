@@ -492,13 +492,14 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         threading.Thread(target=admin_link.post, args=(admin_link.deregister_path(account_id), {}), daemon=True).start()
 
     def _register_all_accounts(self) -> dict[str, Any]:
-        """把本节点现有全部账户一次性批量登记(Admin 倾向:同一 register 端点的 accounts:[])。"""
+        """把本节点现有全部账户一次性批量登记到 Admin。同步执行并回传 Admin 真实响应,
+        让用户一眼看到登记成功/失败原因(201/401/404/连不上),不再静默黑盒。"""
         if not admin_link.is_enabled():
-            return {"registered": 0, "error": "未配置 Admin 地址"}
+            return {"registered": 0, "ok": False, "detail": "未配置 Admin 地址"}
         accounts = self.trading.list_accounts()
         port = self._server_port()
-        threading.Thread(target=admin_link.register_node_accounts, args=(port, accounts), daemon=True).start()
-        return {"registered": len(accounts), "node_id": admin_link.node_id()}
+        ok, detail = admin_link.register_node_accounts(port, accounts)
+        return {"registered": len(accounts), "ok": ok, "detail": detail, "node_id": admin_link.node_id()}
 
     def _refresh_industries(self, data_source: Any, symbols: list[str]) -> None:
         """best-effort:用数据源给未分类的标的取申万行业并缓存。连接器未提供 get_industries 则跳过。"""

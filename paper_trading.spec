@@ -123,8 +123,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "PaperTrading",
             "CFBundleDisplayName": "量化模拟盘",
-            "CFBundleShortVersionString": "1.15.3",
-            "CFBundleVersion": "1.15.3",
+            "CFBundleShortVersionString": "1.15.4",
+            "CFBundleVersion": "1.15.4",
             "NSHighResolutionCapable": True,
         },
     )

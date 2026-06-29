@@ -1368,11 +1368,11 @@ async function saveAdminLink() {
 
 async function registerAllAccounts() {
   const r = await postJson("/api/admin-link/register-all", {});
-  if (r.error) {
-    showToast(r.error);
-    return;
+  if (r.ok) {
+    showToast(`登记成功(${r.registered} 个账户)· Admin ${r.detail || ""}`);
+  } else {
+    showToast(`登记失败:${r.detail || r.error || "未知"}`);
   }
-  showToast(`已向 Admin 登记本机 ${r.registered} 个账户`);
 }
 
 async function handleStoragePick() {

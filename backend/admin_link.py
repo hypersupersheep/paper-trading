@@ -10,6 +10,7 @@ import json
 import secrets
 import socket
 import time
+import urllib.error
 import urllib.request
 import uuid
 from typing import Any
@@ -197,34 +198,57 @@ def account_segment(account: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def post(path: str, payload: dict[str, Any], timeout: float = 5.0) -> bool:
-    """向 Admin 发一次 POST(best-effort)。X-Admin-Token = Admin 共享密钥(配了才带)。"""
+def post(path: str, payload: dict[str, Any], timeout: float = 5.0) -> tuple[bool, str]:
+    """向 Admin 发一次 POST(best-effort)。X-Admin-Token = Admin 共享密钥(配了才带)。
+
+    返回 (ok, detail):detail 带 HTTP 状态码/错误体,登记失败时可直接显示给用户定位
+    (401=token 不对、404=路径不对、连不上=网络),避免静默黑盒。
+    """
     cfg = load()
     if not cfg.get("admin_url"):
-        return False
+        return False, "未配置 Admin 地址"
+    url = str(cfg["admin_url"]).rstrip("/") + path
     try:
-        url = str(cfg["admin_url"]).rstrip("/") + path
         headers = {"Content-Type": "application/json"}
         if cfg.get("admin_token"):
             headers["X-Admin-Token"] = cfg["admin_token"]  # Admin 共享密钥,非 node.token
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-        urllib.request.urlopen(req, timeout=timeout).read()
-        return True
-    except Exception:  # noqa: BLE001 - Admin 不可达不影响本地
-        return False
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        return True, f"{getattr(resp, 'status', 200)} {getattr(resp, 'reason', 'OK')}"
+    except urllib.error.HTTPError as exc:  # Admin 返回了 4xx/5xx —— 这才是要看的信息
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace").strip()[:160]
+        except Exception:  # noqa: BLE001
+            pass
+        hint = ""
+        if exc.code == 401:
+            hint = "(Admin Token 没填/填错;老板机若设了 ADMIN_TOKEN,本机要填一致的)"
+        elif exc.code == 404:
+            hint = "(端点路径不对;admin_url 应为纯 http://IP:端口,勿带尾斜杠)"
+        return False, f"Admin 返回 {exc.code} {exc.reason}{(' · ' + body) if body else ''}{hint}"
+    except Exception as exc:  # noqa: BLE001 - Admin 不可达不影响本地
+        return False, f"连不上 Admin({url}):{exc}"
 
 
-def register_node_accounts(port: int, accounts: list[dict[str, Any]], retries: int = 1, delay: float = 0.0) -> bool:
-    """批量登记:一次 POST {node, accounts:[...]} 到同一 register 端点(Admin 倾向口径),可重试。"""
-    if not is_enabled() or not accounts:
-        return False
+def register_node_accounts(port: int, accounts: list[dict[str, Any]], retries: int = 1, delay: float = 0.0) -> tuple[bool, str]:
+    """批量登记:一次 POST {node, accounts:[...]} 到同一 register 端点(Admin 倾向口径),可重试。
+
+    返回 (ok, detail)。detail = 最后一次尝试的结果,供「登记现有全部账户」回显。
+    """
+    if not is_enabled():
+        return False, "未配置 Admin 地址"
+    if not accounts:
+        return False, "本机暂无账户可登记"
     payload = {"node": node_descriptor(port), "accounts": [account_segment(a) for a in accounts]}
+    detail = ""
     for attempt in range(max(1, retries)):
-        if post("/api/admin/accounts/register", payload):
-            return True
+        ok, detail = post("/api/admin/accounts/register", payload)
+        if ok:
+            return True, detail
         if delay and attempt < retries - 1:
             time.sleep(delay)
-    return False
+    return False, detail
 
 
 def deregister_path(account_id: str) -> str:
