@@ -57,6 +57,7 @@ class RiskStore:
             conn.close()
 
     def _ensure_schema(self) -> None:
+        folded: list[tuple[str, int]] = []
         with self._connection() as conn:
             conn.execute(
                 """
@@ -78,11 +79,93 @@ class RiskStore:
                 )
                 """
             )
-            # 老库迁移:max_sleeve_exposure -> max_exposure;并清掉 sleeve 级配置(已无 sleeve)。
+            # 老库迁移:max_sleeve_exposure -> max_exposure。
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(risk_configs)").fetchall()}
             if "max_sleeve_exposure" in cols and "max_exposure" not in cols:
                 conn.execute("ALTER TABLE risk_configs RENAME COLUMN max_sleeve_exposure TO max_exposure")
-            conn.execute("DELETE FROM risk_configs WHERE scope_type = 'sleeve'")
+            # sleeve 级风控配置不能直接删(会静默削弱安全控制):把它逐字段"取最严"折叠提升到账户级
+            # (各 cap 取 min、min_cash_buffer 取 max),再清掉 sleeve 行。
+            folded = self._fold_sleeve_configs(conn)
+        # 事务提交后再写审计(同库,避免与本事务争锁)。
+        for account_id, dropped in folded:
+            self.audit_store.record_event(
+                AuditEvent(
+                    timestamp=_now(),
+                    ledger_type="system",
+                    event_type="risk_config_migrated",
+                    account_id=account_id,
+                    reason="sleeve 级风控限额已逐字段取最严折叠提升到账户级(拔除 sleeve 升级)",
+                    metadata={"folded_sleeve_configs": dropped},
+                )
+            )
+
+    def _fold_sleeve_configs(self, conn: sqlite3.Connection) -> list[tuple[str, int]]:
+        """把 sleeve 级风控配置折叠提升到账户级,返回 [(account_id, 被折叠的 sleeve 条数)]。
+
+        每字段取最严:notional/exposure/symbol_position/orders_* 取 min,min_cash_buffer 取 max。
+        只折叠 enabled 的层(停用配置本不施加限额);折叠后账户级配置 enabled。
+        """
+        rows = [dict(r) for r in conn.execute("SELECT * FROM risk_configs").fetchall()]
+        if not any(r["scope_type"] == "sleeve" for r in rows):
+            return []
+        now = _now()
+        by_acct: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            by_acct.setdefault(r["account_id"], []).append(r)
+
+        folded: list[tuple[str, int]] = []
+        for account_id, configs in by_acct.items():
+            sleeve_count = sum(1 for c in configs if c["scope_type"] == "sleeve")
+            if sleeve_count == 0:
+                continue
+            layers = [c for c in configs if c["enabled"]]
+            limits: dict[str, Any] = {}
+            for field in RISK_LIMIT_FIELDS:
+                vals = [c[field] for c in layers if c.get(field) is not None]
+                if not vals:
+                    limits[field] = None
+                elif field == "min_cash_buffer":
+                    limits[field] = max(vals)  # 现金下限:越大越严
+                else:
+                    limits[field] = min(vals)  # 各上限:越小越严
+                if field in INTEGER_LIMIT_FIELDS and limits[field] is not None:
+                    limits[field] = int(limits[field])
+            folded.append((account_id, sleeve_count))
+            # 折叠结果全空(原 sleeve 配置都已停用)→ 不建账户级垃圾行,仅清 sleeve。
+            if all(v is None for v in limits.values()):
+                continue
+            existing = next((c for c in configs if c["scope_type"] == "account"), None)
+            config_id = existing["id"] if existing else f"risk_{uuid.uuid4().hex[:10]}"
+            created_at = existing["created_at"] if existing else now
+            conn.execute(
+                """
+                INSERT INTO risk_configs (
+                    id, scope_type, scope_id, account_id, enabled,
+                    max_order_notional, max_exposure, max_symbol_position,
+                    min_cash_buffer, max_orders_per_tick, max_orders_per_day,
+                    created_at, updated_at
+                )
+                VALUES (?, 'account', ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scope_type, scope_id)
+                DO UPDATE SET
+                    enabled = 1,
+                    max_order_notional = excluded.max_order_notional,
+                    max_exposure = excluded.max_exposure,
+                    max_symbol_position = excluded.max_symbol_position,
+                    min_cash_buffer = excluded.min_cash_buffer,
+                    max_orders_per_tick = excluded.max_orders_per_tick,
+                    max_orders_per_day = excluded.max_orders_per_day,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    config_id, account_id, account_id,
+                    limits["max_order_notional"], limits["max_exposure"], limits["max_symbol_position"],
+                    limits["min_cash_buffer"], limits["max_orders_per_tick"], limits["max_orders_per_day"],
+                    created_at, now,
+                ),
+            )
+        conn.execute("DELETE FROM risk_configs WHERE scope_type = 'sleeve'")
+        return folded
 
     def upsert_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         account_id = _required(payload, "account_id")

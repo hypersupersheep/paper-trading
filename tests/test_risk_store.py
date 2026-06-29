@@ -262,6 +262,58 @@ def on_bar(ctx, bar):
         self.assertGreater(len(rejected), 0)
         self.assertIn("max_order_notional", rejected[0]["reason"])
 
+    def test_legacy_sleeve_risk_configs_folded_up_not_dropped(self) -> None:
+        """老库升级:sleeve 级风控限额逐字段取最严折叠到账户级,不静默丢失(P1-1)。"""
+        import sqlite3
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "legacy_risk.sqlite3"
+        audit = AuditStore(db)
+        trading = TradingStore(db, audit)
+        trading.create_account({"id": "acct_f", "name": "F", "initial_cash": 1_000_000})
+        # 手工建老结构(含 max_sleeve_exposure + sleeve scope 行),绕过新 RiskStore。
+        conn = sqlite3.connect(db)
+        conn.execute(
+            """
+            CREATE TABLE risk_configs (
+                id TEXT PRIMARY KEY, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL,
+                account_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                max_order_notional REAL, max_sleeve_exposure REAL, max_symbol_position INTEGER,
+                min_cash_buffer REAL, max_orders_per_tick INTEGER, max_orders_per_day INTEGER,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(scope_type, scope_id)
+            )
+            """
+        )
+        # 账户级只设了 notional;sleeve 级设了 exposure + cash_buffer(老模型完全合法)。
+        conn.execute(
+            "INSERT INTO risk_configs VALUES ('r1','account','acct_f','acct_f',1,500000,NULL,NULL,NULL,NULL,NULL,'t','t')"
+        )
+        conn.execute(
+            "INSERT INTO risk_configs VALUES ('r2','sleeve','slv_x','acct_f',1,NULL,0.8,NULL,1000,NULL,NULL,'t','t')"
+        )
+        # 第二个 sleeve:更严的 exposure 0.5 → 折叠应取 min(0.8, 0.5)=0.5。
+        conn.execute(
+            "INSERT INTO risk_configs VALUES ('r3','sleeve','slv_y','acct_f',1,NULL,0.5,NULL,NULL,NULL,NULL,'t','t')"
+        )
+        conn.commit()
+        conn.close()
+
+        # 构造 RiskStore 触发迁移(列重命名 + 折叠)。
+        risk = RiskStore(db, audit, trading)
+        limits = risk.resolve_limits("acct_f")
+        self.assertIsNotNone(limits)
+        self.assertEqual(limits["max_order_notional"], 500000)  # 账户级保留
+        self.assertEqual(limits["max_exposure"], 0.5)  # 两 sleeve 取最严(min)
+        self.assertEqual(limits["min_cash_buffer"], 1000)  # sleeve 级提升,未丢
+        # sleeve 行已清,只剩账户级。
+        configs = risk.list_configs("acct_f")
+        self.assertEqual({c["scope_type"] for c in configs}, {"account"})
+        # 迁移留痕(可追溯,非静默)。
+        migr = audit.list_events({"event_type": "risk_config_migrated", "account_id": "acct_f"})
+        self.assertEqual(len(migr), 1)
+        self.assertEqual(migr[0]["metadata"]["folded_sleeve_configs"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
