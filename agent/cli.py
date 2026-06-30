@@ -56,7 +56,7 @@ def cmd_accounts(args, pt):
     accounts = pt.list_accounts()
     if args.json:
         return accounts
-    return "\n".join(f"{a['id']}  {a['name']}  现金 {a['unallocated_cash']:,.0f}" for a in accounts) or "(无账户)"
+    return "\n".join(f"{a['id']}  {a['name']}  现金 {a['cash']:,.0f}" for a in accounts) or "(无账户)"
 
 
 def cmd_strategies(args, pt):
