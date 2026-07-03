@@ -17,6 +17,10 @@ import sys
 
 from PyInstaller.utils.hooks import collect_all
 
+# 版本单一来源:从 backend/version.py 读,避免这里硬编码后每次发版忘了同步(曾导致 .app 版本停在旧号)。
+sys.path.insert(0, os.getcwd())
+from backend.version import __version__ as APP_VERSION
+
 block_cipher = None
 # 按平台选图标:Windows 用 .ico,macOS 用 .icns。
 _ICON = "assets/PaperTrading.ico" if sys.platform.startswith("win") else "assets/PaperTrading.icns"
@@ -123,8 +127,8 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "PaperTrading",
             "CFBundleDisplayName": "量化模拟盘",
-            "CFBundleShortVersionString": "1.15.5",
-            "CFBundleVersion": "1.15.5",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
         },
     )
