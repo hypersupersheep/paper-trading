@@ -19,6 +19,8 @@ from backend import repo
 from backend.audit_store import AuditEvent, LEDGER_TYPES, AuditStore
 from backend.backtest_store import BacktestStore
 from backend.chart_service import ChartService
+from backend.compute_cache import ComputeCache
+from backend.daily_bar_cache import DailyBarCache, fetch_with_cache
 from backend.connector_settings import mask_secret, save_connector_settings
 from backend.data_connectors import normalize_frequency
 from backend.nav_reconstruction import prev_trading_day as _prev_trading_day, reconstruct as reconstruct_nav
@@ -48,6 +50,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
     charts = ChartService(store, strategies.connectors)
     watchlist = WatchlistStore(DB_PATH)
     performance = PerformanceStore(DB_PATH)
+    cache = ComputeCache(DB_PATH)  # 派生计算缓存(NAV/绩效/流水/盈亏),按账本版本失效
+    bar_cache = DailyBarCache(DB_PATH)  # 历史日线(不复权)不可变缓存,NAV 冷重算只补拉今天那一小段
     scheduler.performance = performance  # scheduler tick 完成时自动追加 NAV 快照
     backtest = BacktestStore(DB_PATH, strategies, timing, strategies.connectors)
     # broker 复用 strategy store 的 connector registry，下单省略价格时按行情 close 定价。
@@ -222,15 +226,28 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/api/audit/trades":
-                trades = self.store.trade_summaries(query)
-                self._fill_trade_names(query.get("data_source"), trades)
+                _extra = "|".join(str(query.get(k, "")) for k in ("symbol", "strategy_id", "run_id", "limit", "data_source"))
+
+                def _compute_trades() -> list:
+                    t = self.store.trade_summaries(query)
+                    self._fill_trade_names(query.get("data_source"), t)
+                    return t
+
+                trades = self._cached_by_ledger("trades", query.get("account_id"), _extra, _compute_trades)
                 self._json({"trades": trades})
                 return
             if path == "/api/audit/pnl":
-                # 历史个股盈亏:当前仍持仓的标的归"现有持仓",不计入历史。
-                held = set(self.trading.list_position_symbols(query.get("account_id")))
-                board = self.store.realized_pnl_by_symbol(query, exclude_symbols=held)
-                self._fill_trade_names(query.get("data_source"), board["symbols"])
+                _acct = query.get("account_id")
+                _extra = "|".join(str(query.get(k, "")) for k in ("symbol", "strategy_id", "limit", "data_source"))
+
+                def _compute_pnl() -> dict:
+                    # 历史个股盈亏:当前仍持仓的标的归"现有持仓",不计入历史。
+                    held = set(self.trading.list_position_symbols(_acct))
+                    board = self.store.realized_pnl_by_symbol(query, exclude_symbols=held)
+                    self._fill_trade_names(query.get("data_source"), board["symbols"])
+                    return board
+
+                board = self._cached_by_ledger("pnl", _acct, _extra, _compute_pnl)
                 self._json(board)
                 return
             if path.startswith("/api/audit/"):
@@ -597,7 +614,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         for account in summary.get("accounts", []):
             holdings = float(account.get("holdings_day_pnl") or 0.0)
             realized_today = 0.0
-            for row in self.store.trade_summaries({"account_id": account["id"], "limit": 100000}):
+            # 只折"今天"的成交链:每笔 SELL 的已实现盈亏可由其自身链算出(avg_cost 存在持仓子事件里),
+            # 无需折叠整条账本。对成交上万笔的账户,这一步从 ~1.3s 降到毫秒级(且这是实时轮询接口)。
+            for row in self.store.trade_summaries({"account_id": account["id"], "start": today, "limit": 100000}):
                 if (
                     row.get("kind") == "trade"
                     and not row.get("voided")
@@ -719,9 +738,39 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
     def _today_cn() -> str:
         return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
 
+    def _cached_by_ledger(self, kind: str, account_id: str | None, extra: str, compute):
+        """按账本版本缓存一个账户级派生结果:同账户账本没变、extra 没变 → 直接返上次结果,不重算。
+        无 account_id(全局查询,少见)不缓存。缓存 best-effort,任何异常回落到 compute()。"""
+        if not account_id:
+            return compute()
+        try:
+            version = self.store.ledger_version(account_id)
+            cache_key = f"{kind}:{account_id}"
+            cached = self.cache.get(cache_key, version, extra)
+            if cached is not None:
+                return cached
+            result = compute()
+            self.cache.put(cache_key, version, extra, result)
+            return result
+        except Exception:  # noqa: BLE001 - 缓存层绝不拖垮请求
+            return compute()
+
     def _reconstruct_nav(self, account: dict, data_source: str) -> dict:
-        """从账本(成交+现金流)重建净值曲线 + 逐日逆回购计划。供绩效展示与逆回购补全共用。"""
+        """从账本(成交+现金流)重建净值曲线 + 逐日逆回购计划。供绩效展示与逆回购补全共用。
+
+        缓存:结果按 (账本版本, data_source, 当日) 缓存——没新成交且同一天再调,直接返上次结果,
+        不重放全账本、不重拉历史日线。任何新成交/现金/补录/作废使账本版本跳变 → 自动失效重算。
+        (曲线末点=今日,盯市价随行情动;但绩效展示会用实时权益覆盖末点,故缓存历史部分不影响正确性。)
+        """
         account_id = account["id"]
+        today = self._today_cn()
+        ds = data_source or app_settings.default_data_source()
+        version = self.store.ledger_version(account_id)
+        cache_key = f"nav:{account_id}"
+        extra = f"{ds}|{today}"
+        cached = self.cache.get(cache_key, version, extra)
+        if cached is not None:
+            return cached
         trade_events = self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
         voided = self.store.voided_trade_event_ids(account_id)
         fills = [
@@ -745,23 +794,17 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             and not str(e["event_type"]).startswith("reverse_repo")
             and (e.get("metadata") or {}).get("trade_event_id") not in voided
         ]
-        today = self._today_cn()
         daily_closes: dict[str, dict[str, float]] = {}
         repo_rates: dict[str, float] = {}
         symbols = sorted({str(f["symbol"]).upper() for f in fills})
         if fills and symbols:
             start_date = min(str(f["timestamp"])[:10] for f in fills)
-            connector = self.strategies.connectors.get(data_source or app_settings.default_data_source())
-            try:
-                bars = connector.get_bars(symbols, frequency="1d", limit=2000, start=start_date, end=today)
-                for bar in bars:
-                    sym = str(bar["symbol"]).upper()
-                    daily_closes.setdefault(sym, {})[str(bar["timestamp"])[:10]] = float(bar["close"])
-            except Exception:  # noqa: BLE001 - 盯市取数失败就用成交价兜底
-                daily_closes = {}
+            connector = self.strategies.connectors.get(ds)
+            # 历史日线走不可变缓存,冷重算只补拉今天那一小段(不再每次拉全历史 × 全标的)。
+            daily_closes = fetch_with_cache(self.bar_cache, connector, ds, symbols, start_date, today)
             # 闲置现金的逐日逆回购利率:按实时行情(GC001 逐日年化),取不到则回退账户默认利率。
             repo_rates = repo.fetch_daily_rates(connector, repo.DEFAULT_SYMBOL, start=start_date, end=today)
-        return reconstruct_nav(
+        result = reconstruct_nav(
             initial_cash=account["initial_cash"],
             fills=fills,
             cash_flows=cash_flows,
@@ -771,6 +814,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             repo_enabled=bool(account["auto_reverse_repo_enabled"]),
             repo_rates=repo_rates,
         )
+        self.cache.put(cache_key, version, extra, result)
+        return result
 
     def _performance(self, query: dict) -> dict:
         account_id = self._resolve_account_id(query.get("account_id"))
@@ -780,6 +825,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         mark_source = query.get("data_source") or app_settings.default_data_source()
         recon = self._reconstruct_nav(account, mark_source)
         curve = recon["curve"]
+        live: dict | None = None  # 实时盯市概览:整个绩效请求只拉一次,后面归因/持仓分析复用,别重复拉 274 只
         if curve:
             # 口径一致性:① 曲线起点锚定到初始资金(首笔成交前一交易日),累计收益对初始资金算;
             #            ② 末点用与头部相同的实时权益,保证绩效"当前权益"与组合概览一致。
@@ -792,15 +838,13 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 live_equity = round(float(live["accounts"][0]["equity"]), 2)
                 curve = [*curve[:-1], {**curve[-1], "equity": live_equity}]
             except Exception:  # noqa: BLE001 - 实时盯市失败就用重建末点,不影响展示
-                pass
+                live = None
         result = metrics_from_curve(curve, account["initial_cash"])
         result["account_id"] = account_id
         result["account_name"] = account["name"]
         result["start_date"] = recon["start_date"]
         result["repo_interest_total"] = round(sum(r["interest"] for r in recon["repo_schedule"]), 2)
-        result["trade_count"] = len(
-            self.store.list_events({"event_type": "trade_filled", "account_id": account_id, "limit": 100000})
-        )
+        result["trade_count"] = self.store.count_events("trade_filled", account_id)
 
         # 基准叠加(默认沪深300):best-effort,拉不到/对不齐就返回 None,前端只画策略曲线。
         benchmark_symbol = (query.get("benchmark") or "000300.SH").upper()
@@ -815,21 +859,24 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
 
         # 业绩归因(个股盈亏贡献)+ 持仓分析(换手/集中度)。best-effort,失败不影响主绩效。
         try:
-            result["attribution"] = self._contribution(account_id, mark_source, account["initial_cash"])
-            result["holdings_analysis"] = self._holdings_analysis(account_id, mark_source, account["initial_cash"])
+            result["attribution"] = self._contribution(account_id, mark_source, account["initial_cash"], live=live)
+            result["holdings_analysis"] = self._holdings_analysis(account_id, mark_source, account["initial_cash"], live=live)
         except Exception:  # noqa: BLE001
             result["attribution"] = None
             result["holdings_analysis"] = None
         return result
 
-    def _contribution(self, account_id: str, mark_source: str, initial_cash: float) -> dict:
+    def _contribution(self, account_id: str, mark_source: str, initial_cash: float, live: dict | None = None) -> dict:
         """个股盈亏贡献归因:每只票 已实现+浮动 盈亏 ÷ 初始资金 = 对总收益的贡献(百分点)。
 
         股票贡献之和 + 残差(现金/逆回购/费用)= 账户总盈亏,构成可对账的瀑布。
         """
         from backend import industries
 
-        realized = self.store.realized_pnl_by_symbol({"account_id": account_id})
+        # 已实现盈亏是纯账本派生(不依赖实时价),按账本版本缓存——没新成交直接复用,不再折全账本。
+        realized = self._cached_by_ledger(
+            "realized_board", account_id, "", lambda: self.store.realized_pnl_by_symbol({"account_id": account_id})
+        )
         rows: dict[str, dict] = {}
         for sym in realized["symbols"]:
             rows[sym["symbol"]] = {
@@ -840,7 +887,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "fees": sym["fees"],
                 "market_value": 0.0,
             }
-        live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
+        if live is None:  # 上层没传实时概览才自己拉(避免一次绩效请求重复盯市 274 只)
+            live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
         account = live["accounts"][0] if live.get("accounts") else None
         self._refresh_industries(mark_source, list(rows.keys()) + [p["symbol"] for p in (account or {}).get("positions", [])])
         for pos in (account or {}).get("positions", []):
@@ -885,15 +933,22 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             "initial_cash": round(initial_cash, 2),
         }
 
-    def _holdings_analysis(self, account_id: str, mark_source: str, initial_cash: float) -> dict:
+    def _holdings_analysis(self, account_id: str, mark_source: str, initial_cash: float, live: dict | None = None) -> dict:
         """持仓分析:累计换手率 + 集中度(头号/前五权重、HHI、持仓数)。"""
-        traded_notional = sum(
-            float(t.get("gross_amount") or 0.0)
-            for t in self.store.trade_summaries({"account_id": account_id, "limit": 100000})
-            if t.get("kind") == "trade" and not t.get("voided")
+        # 累计成交额是纯账本派生,按账本版本缓存——没新成交不再为算换手率折全账本(重账户 ~1.3s)。
+        traded_notional = self._cached_by_ledger(
+            "turnover_notional",
+            account_id,
+            "",
+            lambda: sum(
+                float(t.get("gross_amount") or 0.0)
+                for t in self.store.trade_summaries({"account_id": account_id, "limit": 100000})
+                if t.get("kind") == "trade" and not t.get("voided")
+            ),
         )
         turnover = round(traded_notional / initial_cash, 4) if initial_cash else 0.0
-        live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
+        if live is None:  # 复用上层实时概览,避免第三次盯市 274 只
+            live = self._portfolio_summary({"account_id": account_id, "data_source": mark_source})
         account = live["accounts"][0] if live.get("accounts") else None
         positions = (account or {}).get("positions", [])
         equity = float(account["equity"]) if account else 0.0

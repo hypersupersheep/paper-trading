@@ -82,6 +82,42 @@ class AuditStoreTest(unittest.TestCase):
         self.assertIn("stamp_duty", event_types)
         self.assertIn("slippage", event_types)
 
+    def test_trade_summaries_start_filter_folds_only_that_window(self) -> None:
+        # 当日盈亏优化依赖:trade_summaries 传 start 时只折该时点之后的成交,且每笔 SELL 的
+        # 已实现盈亏仍能由其自身链(持仓子事件里的 avg_cost)算出,不需要折全账本。
+        self.store.record_trade_settlement(
+            account_id="acct", strategy_id="s", run_id="r", symbol="600000.SH", side="SELL",
+            quantity=100, price=12.0, timestamp="2026-07-02T14:00:00+08:00",  # 昨天卖
+            source_event_id="sig_yday", cash_before=50_000, position_before=100, avg_cost_before=10.0,
+            commission=0, stamp_duty=0, slippage_cost=0,
+        )
+        self.store.record_trade_settlement(
+            account_id="acct", strategy_id="s", run_id="r", symbol="600000.SH", side="SELL",
+            quantity=100, price=15.0, timestamp="2026-07-03T10:00:00+08:00",  # 今天卖
+            source_event_id="sig_today", cash_before=51_200, position_before=100, avg_cost_before=10.0,
+            commission=0, stamp_duty=0, slippage_cost=0,
+        )
+        full = [r for r in self.store.trade_summaries({"account_id": "acct"}) if r.get("kind") == "trade"]
+        today = [r for r in self.store.trade_summaries({"account_id": "acct", "start": "2026-07-03"}) if r.get("kind") == "trade"]
+        self.assertEqual(len(full), 2)
+        self.assertEqual(len(today), 1)  # start=today 只折出今天那笔
+        self.assertEqual(today[0]["timestamp"][:10], "2026-07-03")
+        # 今天那笔的已实现 = 100*(15-10) = 500,与全量折叠里同一笔一致(链自足,不受过滤影响)
+        self.assertEqual(today[0]["realized_pnl"], 500.0)
+        same = next(r for r in full if r["timestamp"][:10] == "2026-07-03")
+        self.assertEqual(same["realized_pnl"], today[0]["realized_pnl"])
+
+    def test_count_events_matches_manual_count(self) -> None:
+        for i in range(3):
+            self.store.record_trade_settlement(
+                account_id="acct", strategy_id="s", run_id="r", symbol="000001.SZ", side="BUY",
+                quantity=100, price=10.0, timestamp=f"2026-07-03T10:0{i}:00+08:00",
+                source_event_id=None, cash_before=1_000_000, position_before=0, avg_cost_before=0,
+                commission=1, stamp_duty=0, slippage_cost=0,
+            )
+        self.assertEqual(self.store.count_events("trade_filled", "acct"), 3)
+        self.assertEqual(self.store.count_events("trade_filled", "other"), 0)
+
     def test_timing_block_is_queryable_in_decision_log(self) -> None:
         self.store.record_event(
             AuditEvent(

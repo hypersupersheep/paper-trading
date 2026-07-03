@@ -130,6 +130,27 @@ class AuditStore:
                 ON audit_events (source_event_id)
                 """
             )
+            # 复合索引 (account_id, event_type):既服务缓存失效键 ledger_version 的 MAX(rowid) WHERE account_id,
+            # 也服务 count_events 和 NAV 重放里的 (event_type, account_id) 查询——现有 idx_..._filters 以
+            # ledger_type 打头,不指定 ledger_type 时用不上,故这些"只按 account+event_type"的热查询需要专门索引。
+            conn.execute("DROP INDEX IF EXISTS idx_audit_events_account")  # 旧单列索引(未发布过),升级为复合
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_acct_type ON audit_events (account_id, event_type)"
+            )
+            # (account_id, timestamp):服务"某账户某日之后的事件"范围查询(如当日已实现盈亏只折今天),
+            # 让它走范围 seek 而非扫全账户历史,同时天然满足 ORDER BY timestamp。
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_acct_ts ON audit_events (account_id, timestamp)"
+            )
+
+    def ledger_version(self, account_id: str) -> int:
+        """该账户账本的单调版本号 = 其审计事件 max(rowid)。任何新事件(成交/现金/补录/作废)
+        都会让它变大,故可当计算缓存的失效键:版本没变即无新事件、缓存结果可直接复用。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(rowid) AS v FROM audit_events WHERE account_id = ?", (account_id,)
+            ).fetchone()
+        return int(row["v"]) if row and row["v"] is not None else 0
 
     def clear(self) -> None:
         with self._connection() as conn:
@@ -139,6 +160,16 @@ class AuditStore:
         with self._connection() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM audit_events").fetchone()
             return int(row["count"])
+
+    def count_events(self, event_type: str, account_id: str) -> int:
+        """按类型/账户直接 COUNT,不 hydrate 事件行。用于成交笔数等只要个数的场景
+        (对成交上万笔的账户,COUNT ~1ms vs 全量拉行 ~100ms+)。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ? AND account_id = ?",
+                (event_type, account_id),
+            ).fetchone()
+            return int(row["count"]) if row else 0
 
     def record_event(self, event: AuditEvent) -> str:
         event_id = event.event_id or f"evt_{uuid.uuid4().hex[:16]}"
