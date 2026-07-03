@@ -544,36 +544,48 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         # 顺带用数据源给未命名的持仓取名并缓存(best-effort,绝不影响盯市)。
         self._refresh_names(connector, symbols)
         mark_prices: dict[str, dict] = {}
+        mark_error: str | None = None
         if symbols:
-            # 多拉几根 bar: 最新 close 做盯市价, 整段收益序列算 bar 级波动率。
-            bars = connector.get_bars(symbols, frequency=frequency, limit=20)
-            closes_by_symbol: dict[str, list[tuple[str, float]]] = {}
-            for bar in bars:
-                symbol = str(bar["symbol"]).upper()
-                closes_by_symbol.setdefault(symbol, []).append((str(bar.get("timestamp")), float(bar["close"])))
-            # 昨收(当日盈亏基线):取日线倒数第二根的收盘。best-effort,取不到则该标的当日盈亏记 0。
-            prev_close = self._prev_close_map(connector, symbols)
-            for symbol, series in closes_by_symbol.items():
-                series.sort(key=lambda item: item[0])
-                timestamp, price = series[-1]
-                mark_prices[symbol] = {
-                    "price": price,
-                    "timestamp": timestamp,
-                    "data_source": data_source,
-                    "frequency": frequency,
-                    "volatility": _bar_volatility([close for _, close in series]),
-                    "prev_close": prev_close.get(symbol),
-                }
+            # 盯市取价走数据源;数据源报错(如米筐 license 登录机器数超限、网络不通)绝不能让整个
+            # 组合概览 500——降级为「无盯市价」→ 持仓按最后成交价显示,并在 metadata 记下原因。
+            try:
+                # 多拉几根 bar: 最新 close 做盯市价, 整段收益序列算 bar 级波动率。
+                bars = connector.get_bars(symbols, frequency=frequency, limit=20)
+                closes_by_symbol: dict[str, list[tuple[str, float]]] = {}
+                for bar in bars:
+                    symbol = str(bar["symbol"]).upper()
+                    closes_by_symbol.setdefault(symbol, []).append((str(bar.get("timestamp")), float(bar["close"])))
+                # 昨收(当日盈亏基线):取日线倒数第二根的收盘。best-effort,取不到则该标的当日盈亏记 0。
+                prev_close = self._prev_close_map(connector, symbols)
+                for symbol, series in closes_by_symbol.items():
+                    series.sort(key=lambda item: item[0])
+                    timestamp, price = series[-1]
+                    mark_prices[symbol] = {
+                        "price": price,
+                        "timestamp": timestamp,
+                        "data_source": data_source,
+                        "frequency": frequency,
+                        "volatility": _bar_volatility([close for _, close in series]),
+                        "prev_close": prev_close.get(symbol),
+                    }
+            except Exception as exc:  # noqa: BLE001 - 数据源打嗝→降级用最后价,绝不 500
+                mark_error = str(exc)
+                mark_prices = {}
+        try:
+            connector_health = connector.healthcheck()
+        except Exception:  # noqa: BLE001 - 健康探测也别拖垮请求
+            connector_health = {"name": data_source, "status": "error"}
         summary = self.trading.get_portfolio_summary(
             account_id,
             mark_prices=mark_prices,
             mark_metadata={
-                "mode": "connector_close",
+                "mode": "position_last_price" if mark_error else "connector_close",
                 "data_source": data_source,
                 "frequency": frequency,
                 "symbols": symbols,
                 "marked_symbols": sorted(mark_prices),
-                "connector": connector.healthcheck(),
+                "connector": connector_health,
+                "mark_error": mark_error,
             },
         )
         self._attach_day_pnl(summary)
