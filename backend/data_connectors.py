@@ -130,7 +130,7 @@ class TongDaXinDataConnector:
             return {}
         try:
             quotes_module = self._import_mootdx()
-            client = quotes_module.Quotes.factory(market="std", server=("110.41.147.114", 7709), timeout=10)
+            client = quotes_module.Quotes.factory(market="std", timeout=10)
             result: dict[str, str] = {}
             for symbol in symbols:
                 code, suffix = _split_symbol(symbol)
@@ -187,7 +187,9 @@ class TongDaXinDataConnector:
             raise ValueError(f"TongDaXin connector does not support frequency: {frequency}")
         self._prepare_home()
         quotes_module = self._import_mootdx()
-        client = quotes_module.Quotes.factory(market="std", server=("110.41.147.114", 7709), timeout=10)
+        # 不再钉死单台 HQ 服务器:之前钉的 110.41.147.114:7709 端口通但返回空数据(死节点),
+        # 导致"no bars"。交给 mootdx 自动选可用服务器(实测每次 <1s 且稳定返数)。
+        client = quotes_module.Quotes.factory(market="std", timeout=10)
         tdx_frequency = _mootdx_frequency(normalized_frequency)
         start_date = _parse_date(start)
         end_date = _parse_date(end)

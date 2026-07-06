@@ -106,8 +106,11 @@ function queryParams() {
 
 async function fetchJson(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
+  const data = await response.json().catch(() => null);
+  // server 把失败原因放在 body 的 {error} 里(如"Wind 未配置""仅日频""no bars")——
+  // 一定要把它带出来,别只抛裸状态码,否则用户只看到 "HTTP 400" 全靠猜。
+  if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`);
+  return data;
 }
 
 async function loadEvents() {
@@ -1300,12 +1303,10 @@ async function saveRiceQuantKey() {
 async function loadQuote() {
   const symbol = $("quoteSymbol").value.trim().toUpperCase();
   if (!symbol) return;
-  const params = new URLSearchParams({
-    symbol,
-    data_source: $("quoteDataSource").value || "fixture",
-    frequency: $("quoteFrequency").value || "5m",
-    limit: "6",
-  });
+  const source = $("quoteDataSource").value || "fixture";
+  // Wind 残血库只有日频,发 5m 必然 400——选 Wind 时强制 1d,别让默认频率把请求打废。
+  const frequency = source === "wind" ? "1d" : ($("quoteFrequency").value || "5m");
+  const params = new URLSearchParams({ symbol, data_source: source, frequency, limit: "6" });
   const data = await fetchJson(`/api/chart/bars?${params}`);
   $("quoteBars").innerHTML =
     data.bars
