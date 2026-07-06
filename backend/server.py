@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 import threading
@@ -21,6 +22,7 @@ from backend.backtest_store import BacktestStore
 from backend.chart_service import ChartService
 from backend.compute_cache import ComputeCache
 from backend.daily_bar_cache import DailyBarCache, fetch_with_cache
+from backend.mark_cache import MarkCache
 from backend.connector_settings import mask_secret, save_connector_settings
 from backend.data_connectors import normalize_frequency
 from backend.nav_reconstruction import prev_trading_day as _prev_trading_day, reconstruct as reconstruct_nav
@@ -52,6 +54,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
     performance = PerformanceStore(DB_PATH)
     cache = ComputeCache(DB_PATH)  # 派生计算缓存(NAV/绩效/流水/盈亏),按账本版本失效
     bar_cache = DailyBarCache(DB_PATH)  # 历史日线(不复权)不可变缓存,NAV 冷重算只补拉今天那一小段
+    mark_cache = MarkCache(DB_PATH)  # 节点最近算好的实时盯市价,供 Admin 白读(不带 data_source,零额度)
     scheduler.performance = performance  # scheduler tick 完成时自动追加 NAV 快照
     backtest = BacktestStore(DB_PATH, strategies, timing, strategies.connectors)
     # broker 复用 strategy store 的 connector registry，下单省略价格时按行情 close 定价。
@@ -553,7 +556,8 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         account_id = query.get("account_id")
         data_source = query.get("data_source")
         if not data_source:
-            return self.trading.get_portfolio_summary(account_id)
+            # 契约 v9:不带 data_source = Admin 白读,返节点最近算好的实时估值缓存,不碰数据源、零额度。
+            return self._cached_live_summary(account_id)
 
         frequency = normalize_frequency(query.get("frequency") or "5m")
         connector = self.strategies.connectors.get(data_source)
@@ -571,7 +575,10 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 closes_by_symbol: dict[str, list[tuple[str, float]]] = {}
                 for bar in bars:
                     symbol = str(bar["symbol"]).upper()
-                    closes_by_symbol.setdefault(symbol, []).append((str(bar.get("timestamp")), float(bar["close"])))
+                    close = float(bar["close"])
+                    if not math.isfinite(close):  # ricequant 抽风返 NaN/Inf → 跳过,别毒化 equity(否则整份 summary 变坏 JSON)
+                        continue
+                    closes_by_symbol.setdefault(symbol, []).append((str(bar.get("timestamp")), close))
                 # 昨收(当日盈亏基线):取日线倒数第二根的收盘。best-effort,取不到则该标的当日盈亏记 0。
                 prev_close = self._prev_close_map(connector, symbols)
                 for symbol, series in closes_by_symbol.items():
@@ -605,6 +612,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
                 "mark_error": mark_error,
             },
         )
+        # 契约 v9:这次成功盯市的逐标的价存进缓存,供 Admin 白读复用(节点自己刷新时顺手喂,不额外耗额度)。
+        if mark_prices and not mark_error:
+            self.mark_cache.put(mark_prices, self._now_cn_ts())
         self._attach_day_pnl(summary)
         return summary
 
@@ -640,7 +650,7 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             series.setdefault(sym, []).append((str(bar.get("timestamp")), float(bar["close"])))
         for sym, items in series.items():
             items.sort(key=lambda x: x[0])
-            if len(items) >= 2:
+            if len(items) >= 2 and math.isfinite(items[-2][1]):
                 out[sym] = items[-2][1]
         return out
 
@@ -737,6 +747,29 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _today_cn() -> str:
         return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+    @staticmethod
+    def _now_cn_ts() -> str:
+        return datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds")
+
+    def _cached_live_summary(self, account_id: str | None) -> dict:
+        """契约 v9:返节点最近算好的实时估值——用缓存的盯市价 + 当前持仓重算 equity/pnl/day_pnl,
+        全程不碰数据源(零 ricequant 额度)。缓存空(还没刷新过)则回退到 position_last_price,不空不报错。
+        mark.mode='cached_live' + mark.as_of=最近盯市时刻,供 Admin 显示"估值时间"并与实时轮询解耦。"""
+        cached, as_of = self.mark_cache.load_all()
+        if not cached:
+            return self.trading.get_portfolio_summary(account_id)
+        summary = self.trading.get_portfolio_summary(
+            account_id,
+            mark_prices=cached,
+            mark_metadata={
+                "mode": "cached_live",
+                "as_of": as_of,
+                "marked_symbols": sorted(cached),
+            },
+        )
+        self._attach_day_pnl(summary)
+        return summary
 
     def _cached_by_ledger(self, kind: str, account_id: str | None, extra: str, compute):
         """按账本版本缓存一个账户级派生结果:同账户账本没变、extra 没变 → 直接返上次结果,不重算。
@@ -1184,7 +1217,12 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         return payload
 
     def _json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        # allow_nan=False 让 NaN/Infinity 报错而非吐出 `NaN`(非法 JSON,曾让 Admin 解析炸)。
+        # 正常路径零开销;仅当真有非有限浮点(如 ricequant 抽风返 NaN 价)才走一次清洗成 null 再序列化。
+        try:
+            body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except ValueError:
+            body = json.dumps(_json_sanitize(payload), ensure_ascii=False, allow_nan=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
 
     def _send(
@@ -1202,6 +1240,17 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
+
+
+def _json_sanitize(obj):
+    """把非有限浮点(NaN/Infinity)递归替换成 None,保证输出永远是合法 JSON。只在检测到非法值时才调。"""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize(v) for v in obj]
+    return obj
 
 
 def _export_backtest(run: dict, export_format: str) -> tuple[str, str]:
