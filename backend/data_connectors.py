@@ -125,18 +125,60 @@ class TongDaXinDataConnector:
         self.home_dir = Path(home_dir) if home_dir else Path(tempfile.gettempdir()) / "paper-trading-tdx-home"
         # 会话级名称目录:{market_int: {code6: name}},首次拉取后缓存,避免每次取名都拉全市场。
         self._name_catalog: dict[int, dict[str, str]] = {}
-        # 是否已 bestip 探测过可用服务器(见 _factory)。进程级,失败会重置。
-        self._probed = False
+
+    # 类级共享:探测到的可用 HQ 服务器 (ip, port),所有 registry 实例复用,避免各自重探。
+    _server: tuple[str, int] | None = None
+
+    def _probe_working_server(self, quotes_module: Any) -> tuple[str, int] | None:
+        """挨个试内置 HQ 服务器,**用一次真实取数验证**(不是 mootdx 那种只比 ping——快但可能一取数就
+        reset 的服务器会被 ping 选中),返回第一台真能返数的 (ip, port)。
+        背景:mootdx 默认/缓存常落到死节点(110.41.147.114 端口通但返空)或 ping 快却 reset 的服务器,
+        新机器(同事)/过期缓存都会连不上。逐台真实验证最稳。"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        try:
+            from mootdx.consts import CONFIG
+            hosts = [(str(e[1]), int(e[2])) for e in CONFIG.get("SERVER", {}).get("HQ", []) if len(e) >= 3]
+        except Exception:  # noqa: BLE001
+            return None
+        hosts = hosts[:16]
+        if not hosts:
+            return None
+
+        def _try(host: tuple[str, int]) -> tuple[str, int] | None:
+            ip, port = host
+            client = None
+            try:
+                client = quotes_module.Quotes.factory(market="std", server=[ip, port], bestip=False, timeout=4)
+                frame = client.bars(symbol="000001", frequency=9, start=0, offset=1)
+                return host if (frame is not None and len(frame) > 0) else None
+            except Exception:  # noqa: BLE001
+                return None
+            finally:
+                if client is not None and callable(getattr(client, "close", None)):
+                    client.close()
+
+        # 并发验证:一拿到第一台真能返数的就返回,不等慢服务器(它们各自 timeout 后自行结束)。
+        ex = ThreadPoolExecutor(max_workers=len(hosts))
+        try:
+            futures = [ex.submit(_try, h) for h in hosts]
+            for fut in as_completed(futures):
+                res = fut.result()
+                if res:
+                    return res
+            return None
+        finally:
+            ex.shutdown(wait=False)
 
     def _factory(self, quotes_module: Any):
-        """建 mootdx 客户端。**关键**:mootdx 默认第一台 HQ 是 110.41.147.114:7709——端口通但返空
-        的死节点;`bestip=False`(factory 默认)只会用这台默认服务器,所以没跑过 bestip 的**新机器**
-        (同事)必然连不上/no bars。首次带 `bestip=True` 并发探测选一台真正可用的服务器(~0.6s),
-        结果在进程内 mootdx config 复用;后续直接拿好服务器,失败时由调用方重置 _probed 再探。"""
-        bestip = not self._probed
-        client = quotes_module.Quotes.factory(market="std", bestip=bestip, timeout=10)
-        self._probed = True
-        return client
+        """建指向**已验证可用服务器**的 mootdx 客户端。首次(或上次失效后)真实探测一台会返数的,
+        缓存到类级 _server 复用;探测不到才退回 mootdx 自己的 bestip(总比不给强)。"""
+        if TongDaXinDataConnector._server is None:
+            TongDaXinDataConnector._server = self._probe_working_server(quotes_module)
+        if TongDaXinDataConnector._server is not None:
+            ip, port = TongDaXinDataConnector._server
+            return quotes_module.Quotes.factory(market="std", server=[ip, port], bestip=False, timeout=10)
+        return quotes_module.Quotes.factory(market="std", bestip=True, timeout=10)
 
     def get_names(self, symbols: list[str]) -> dict[str, str]:
         """用 mootdx 的全市场证券表取个股中文名(SH=market 1, SZ=market 0)。失败返回空,绝不抛错。"""
@@ -210,7 +252,7 @@ class TongDaXinDataConnector:
                 return self._fetch_bars(client, symbols, normalized_frequency, limit, start, end)
             except Exception as exc:  # noqa: BLE001 - 换服务器重试一次
                 last_err = exc
-                self._probed = False  # 下次 _factory 强制重新 bestip 探测
+                TongDaXinDataConnector._server = None  # 当前服务器失效,下次 _factory 重新探测换一台
             finally:
                 if client is not None:
                     close = getattr(client, "close", None)
