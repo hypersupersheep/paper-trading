@@ -50,6 +50,7 @@ def on_bar(ctx, bar):
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,
+                "data_source": "fixture",  # 合成行情,别依赖 tongdaxin 实网
             },
         )
 
@@ -80,6 +81,7 @@ def on_bar(ctx, bar):
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,
+                "data_source": "fixture",
             },
         )
 
@@ -90,6 +92,7 @@ def on_bar(ctx, bar):
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,
+                "data_source": "fixture",
             },
         )
 
@@ -120,6 +123,7 @@ def on_bar(ctx, bar):
                 "symbols": "000001.SZ",
                 "frequency": "5m",
                 "bar_limit": 2,
+                "data_source": "fixture",
             },
         )
 

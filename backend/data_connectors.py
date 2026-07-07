@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -123,6 +125,18 @@ class TongDaXinDataConnector:
         self.home_dir = Path(home_dir) if home_dir else Path(tempfile.gettempdir()) / "paper-trading-tdx-home"
         # 会话级名称目录:{market_int: {code6: name}},首次拉取后缓存,避免每次取名都拉全市场。
         self._name_catalog: dict[int, dict[str, str]] = {}
+        # 是否已 bestip 探测过可用服务器(见 _factory)。进程级,失败会重置。
+        self._probed = False
+
+    def _factory(self, quotes_module: Any):
+        """建 mootdx 客户端。**关键**:mootdx 默认第一台 HQ 是 110.41.147.114:7709——端口通但返空
+        的死节点;`bestip=False`(factory 默认)只会用这台默认服务器,所以没跑过 bestip 的**新机器**
+        (同事)必然连不上/no bars。首次带 `bestip=True` 并发探测选一台真正可用的服务器(~0.6s),
+        结果在进程内 mootdx config 复用;后续直接拿好服务器,失败时由调用方重置 _probed 再探。"""
+        bestip = not self._probed
+        client = quotes_module.Quotes.factory(market="std", bestip=bestip, timeout=10)
+        self._probed = True
+        return client
 
     def get_names(self, symbols: list[str]) -> dict[str, str]:
         """用 mootdx 的全市场证券表取个股中文名(SH=market 1, SZ=market 0)。失败返回空,绝不抛错。"""
@@ -130,7 +144,7 @@ class TongDaXinDataConnector:
             return {}
         try:
             quotes_module = self._import_mootdx()
-            client = quotes_module.Quotes.factory(market="std", timeout=10)
+            client = self._factory(quotes_module)
             result: dict[str, str] = {}
             for symbol in symbols:
                 code, suffix = _split_symbol(symbol)
@@ -187,36 +201,46 @@ class TongDaXinDataConnector:
             raise ValueError(f"TongDaXin connector does not support frequency: {frequency}")
         self._prepare_home()
         quotes_module = self._import_mootdx()
-        # 不再钉死单台 HQ 服务器:之前钉的 110.41.147.114:7709 端口通但返回空数据(死节点),
-        # 导致"no bars"。交给 mootdx 自动选可用服务器(实测每次 <1s 且稳定返数)。
-        client = quotes_module.Quotes.factory(market="std", timeout=10)
+        # 服务器可能抽风(连接重置/返空);失败就强制重新 bestip 探测换一台,重试一次。
+        last_err: Exception | None = None
+        for _attempt in range(2):
+            client = None
+            try:
+                client = self._factory(quotes_module)
+                return self._fetch_bars(client, symbols, normalized_frequency, limit, start, end)
+            except Exception as exc:  # noqa: BLE001 - 换服务器重试一次
+                last_err = exc
+                self._probed = False  # 下次 _factory 强制重新 bestip 探测
+            finally:
+                if client is not None:
+                    close = getattr(client, "close", None)
+                    if callable(close):
+                        close()
+        raise last_err if last_err else ValueError("TongDaXin returned no bars")
+
+    def _fetch_bars(self, client: Any, symbols: list[str], normalized_frequency: str, limit: int, start: Any, end: Any) -> list[dict[str, Any]]:
         tdx_frequency = _mootdx_frequency(normalized_frequency)
         start_date = _parse_date(start)
         end_date = _parse_date(end)
         bars: list[dict[str, Any]] = []
-        try:
-            for symbol in symbols:
-                raw_symbol = _tdx_symbol(symbol)
-                if start_date is not None:
-                    # 给了历史区间:向更早翻页直到覆盖 start_date(mootdx 的 start 是从最新往回的偏移)。
-                    records = self._paged_records(client, raw_symbol, tdx_frequency, start_date)
-                else:
-                    frame = client.bars(symbol=raw_symbol, frequency=tdx_frequency, start=0, offset=limit)
-                    records = _frame_records(frame)[-limit:]
-                if not records:
-                    raise ValueError(f"TongDaXin returned no bars for {symbol}")
-                for row in records:
-                    bar = _normalize_tdx_row(symbol, normalized_frequency, row)
-                    day = bar["timestamp"][:10]
-                    if start_date and day < start_date.isoformat():
-                        continue
-                    if end_date and day > end_date.isoformat():
-                        continue
-                    bars.append(bar)
-        finally:
-            close = getattr(client, "close", None)
-            if callable(close):
-                close()
+        for symbol in symbols:
+            raw_symbol = _tdx_symbol(symbol)
+            if start_date is not None:
+                # 给了历史区间:向更早翻页直到覆盖 start_date(mootdx 的 start 是从最新往回的偏移)。
+                records = self._paged_records(client, raw_symbol, tdx_frequency, start_date)
+            else:
+                frame = client.bars(symbol=raw_symbol, frequency=tdx_frequency, start=0, offset=limit)
+                records = _frame_records(frame)[-limit:]
+            if not records:
+                raise ValueError(f"TongDaXin returned no bars for {symbol}")
+            for row in records:
+                bar = _normalize_tdx_row(symbol, normalized_frequency, row)
+                day = bar["timestamp"][:10]
+                if start_date and day < start_date.isoformat():
+                    continue
+                if end_date and day > end_date.isoformat():
+                    continue
+                bars.append(bar)
         return sorted(bars, key=lambda item: (item["timestamp"], item["symbol"]))
 
     @staticmethod
@@ -542,6 +566,132 @@ class WindDataConnector:
         return pymysql
 
 
+class IFinDDataConnector:
+    """iFinD(同花顺)HTTP API connector(辉隆内部,Mac 原生,纯 HTTPS 无需 SDK/VM)。
+
+    鉴权:用户在数据源页保存 refresh_token(长期密钥)→ 换 access_token(缓存 6 天,过期/错误自动重取)。
+    日线走 cmd_history_quotation(**CPS=1 不复权**,与 ricequant/wind 一致,保证历史日线缓存的不可变假设成立);
+    分钟走 high_frequency。全程 stdlib urllib,不引入 requests,保持打包 app 自包含。
+    试用账号有两条硬边界:历史仅近 1 年(-4309)、EDB 受限;转正式解除。取数失败原样把 iFinD 错误码/信息带出。
+    """
+
+    BASE = "https://quantapi.51ifind.com/api/v1"
+    _INDICATORS = "open,high,low,close,volume,amount"
+
+    def __init__(self, settings_path: Path | None = None):
+        self.settings_path = settings_path
+        self._access_token: str | None = None
+        self._access_exp: float = 0.0
+        self._token_for: str | None = None  # 换了 refresh_token 就作废 access_token
+
+    def _refresh_token(self) -> str | None:
+        settings = get_connector_settings("ifind", self.settings_path)
+        tok = settings.get("refresh_token")
+        return str(tok).strip() if tok else None
+
+    def supported_frequencies(self) -> list[str]:
+        return ["1d", "5m", "1m"]
+
+    def _http_post(self, endpoint: str, headers: dict[str, str], payload: dict | None) -> dict:
+        data = json.dumps(payload).encode("utf-8") if payload is not None else b""
+        req = urllib.request.Request(f"{self.BASE}/{endpoint}", data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _get_access_token(self, force: bool = False) -> str:
+        rt = self._refresh_token()
+        if not rt:
+            raise ValueError("iFinD 未配置: 请在数据源页保存 refresh_token")
+        if not force and self._access_token and self._token_for == rt and self._access_exp > time.time() + 3600:
+            return self._access_token
+        j = self._http_post("get_access_token", {"refresh_token": rt}, None)
+        tok = (j.get("data") or {}).get("access_token")
+        if not tok:
+            raise ValueError(f"iFinD get_access_token 失败: {str(j.get('errmsg') or j)[:200]}")
+        self._access_token, self._token_for, self._access_exp = tok, rt, time.time() + 6 * 86400
+        return tok
+
+    def _call(self, endpoint: str, payload: dict) -> dict:
+        """带 access_token 调数据端点;遇 token 类错误自动刷新一次重试。"""
+        tok = self._get_access_token()
+        j = self._http_post(endpoint, {"access_token": tok}, payload)
+        ec = j.get("errorcode")
+        if ec not in (0, None) and ("token" in str(j.get("errmsg", "")).lower() or ec in (-1001, -1010, -1011)):
+            tok = self._get_access_token(force=True)
+            j = self._http_post(endpoint, {"access_token": tok}, payload)
+        return j
+
+    def healthcheck(self) -> dict[str, Any]:
+        base = {"name": "ifind", "supported_frequencies": self.supported_frequencies()}
+        rt = self._refresh_token()
+        if not rt:
+            return {**base, "status": "not_configured", "hint": "在数据源页保存 iFinD refresh_token(超级命令→工具→refresh_token 查询)即可启用"}
+        return {
+            **base,
+            "status": "ok" if (self._access_token and self._token_for == rt) else "configured",
+            "refresh_token_masked": mask_secret(rt),
+            "hint": "已保存 refresh_token;首次取数或「保存并测试」时换 access_token 验证。试用账号历史仅近 1 年。",
+        }
+
+    def get_bars(
+        self,
+        symbols: list[str],
+        frequency: str = "1d",
+        limit: int = 8,
+        start: Any = None,
+        end: Any = None,
+    ) -> list[dict[str, Any]]:
+        normalized = normalize_frequency(frequency)
+        if normalized not in self.supported_frequencies():
+            raise ValueError(f"iFinD connector does not support frequency: {frequency}")
+        codes = ",".join(str(s).upper() for s in symbols if str(s).strip())
+        if not codes:
+            return []
+        explicit_range = bool(start)
+        if normalized == "1d":
+            end_date = _parse_date(end) or datetime.now(timezone.utc).date()
+            start_date = _parse_date(start) or (end_date - timedelta(days=max(limit * 2 + 10, 15)))
+            payload = {
+                "codes": codes,
+                "indicators": self._INDICATORS,
+                "startdate": start_date.isoformat(),
+                "enddate": end_date.isoformat(),
+                # CPS=1 不复权:与 ricequant(adjust_type=none)/wind(S_DQ_CLOSE)一致,历史日线才可被不可变缓存。
+                "functionpara": {"Interval": "D", "CPS": "1", "Currency": "RMB", "Fill": "Blank"},
+            }
+            j = self._call("cmd_history_quotation", payload)
+        else:
+            minutes = "1" if normalized == "1m" else "5"
+            now_cn = datetime.now(timezone(timedelta(hours=8)))
+            end_dt = _parse_date(end)
+            end_str = f"{end_dt.isoformat()} 16:00:00" if end_dt else now_cn.strftime("%Y-%m-%d %H:%M:%S")
+            start_dt = _parse_date(start)
+            start_str = f"{start_dt.isoformat()} 09:00:00" if start_dt else (now_cn - timedelta(days=7)).strftime("%Y-%m-%d 09:00:00")
+            payload = {
+                "codes": codes,
+                "indicators": self._INDICATORS,
+                "starttime": start_str,
+                "endtime": end_str,
+                "functionpara": {"Interval": minutes, "Fill": "Original"},
+            }
+            j = self._call("high_frequency", payload)
+
+        parsed = _bars_from_ifind(j, normalized)
+        if not parsed:
+            raise ValueError(f"iFinD returned no bars for {symbols} (errorcode={j.get('errorcode')}, {j.get('errmsg')})")
+        per_symbol: dict[str, list[dict[str, Any]]] = {}
+        for bar in parsed:
+            per_symbol.setdefault(bar["symbol"], []).append(bar)
+        bars: list[dict[str, Any]] = []
+        for _sym, rows in per_symbol.items():
+            rows.sort(key=lambda item: item["timestamp"])
+            bars.extend(rows if explicit_range else rows[-limit:])
+        return sorted(bars, key=lambda item: (item["timestamp"], item["symbol"]))
+
+
 class DataConnectorRegistry:
     def __init__(self):
         self._connectors = {
@@ -549,6 +699,7 @@ class DataConnectorRegistry:
             "tongdaxin": TongDaXinDataConnector(),
             "ricequant": RiceQuantDataConnector(),
             "wind": WindDataConnector(),
+            "ifind": IFinDDataConnector(),
         }
 
     def names(self) -> list[str]:
@@ -680,6 +831,47 @@ def _from_rq_symbol(order_book_id: str) -> str:
     if market == "XSHG":
         return f"{code}.SH"
     return order_book_id
+
+
+def _ifind_ts(value: Any) -> str:
+    """iFinD time → ISO。日线 '2026-06-30' → '2026-06-30T00:00:00';分钟 '2026-06-30 09:35:00' → 'T' 连接。"""
+    s = str(value or "").strip()
+    if not s:
+        return s
+    if len(s) == 10:  # 纯日期
+        return f"{s}T00:00:00"
+    return s.replace(" ", "T", 1)
+
+
+def _bars_from_ifind(j: dict, frequency: str) -> list[dict[str, Any]]:
+    """iFinD 标准响应 tables:[{thscode,time:[..],table:{ind:[..]}}] → 标准 bar 列表。errorcode!=0 抛清晰错误。"""
+    ec = j.get("errorcode")
+    if ec not in (0, None):
+        raise ValueError(f"iFinD 返回错误 {ec}: {j.get('errmsg')}")
+
+    def at(seq: Any, i: int):
+        return seq[i] if isinstance(seq, list) and i < len(seq) else None
+
+    bars: list[dict[str, Any]] = []
+    for tb in (j.get("tables") or []):
+        code = str(tb.get("thscode") or "").upper()
+        times = tb.get("time") or []
+        tab = tb.get("table") or {}
+        for i in range(len(times)):
+            close = _float(at(tab.get("close"), i))
+            volume = _float(at(tab.get("volume"), i))
+            bars.append({
+                "symbol": code,
+                "timestamp": _ifind_ts(times[i]),
+                "frequency": frequency,
+                "open": _float(at(tab.get("open"), i)),
+                "high": _float(at(tab.get("high"), i)),
+                "low": _float(at(tab.get("low"), i)),
+                "close": close,
+                "volume": volume,
+                "amount": _float(at(tab.get("amount"), i) or close * volume),
+            })
+    return bars
 
 
 def _normalize_wind_row(row: dict[str, Any]) -> dict[str, Any]:

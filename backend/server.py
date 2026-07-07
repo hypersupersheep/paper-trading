@@ -348,6 +348,9 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/data/connectors/wind/credentials":
                 self._json(self._save_wind_credentials(payload), HTTPStatus.CREATED)
                 return
+            if path == "/api/data/connectors/ifind/credentials":
+                self._json(self._save_ifind_credentials(payload), HTTPStatus.CREATED)
+                return
             if path == "/api/settings/data-location":
                 self._json(self._set_data_location(payload), HTTPStatus.CREATED)
                 return
@@ -1195,6 +1198,30 @@ class AuditRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - 把连接失败原因原样带给前端。
             test = {"ok": False, "error": str(exc)}
         return {"saved": True, "license_key_masked": mask_secret(license_key), "test": test, "health": connector.healthcheck()}
+
+    def _save_ifind_credentials(self, payload: dict) -> dict:
+        refresh_token = str(payload.get("refresh_token") or "").strip()
+        if not refresh_token:
+            raise ValueError("refresh_token is required")
+        save_connector_settings("ifind", {"refresh_token": refresh_token})
+        # 审计只记掩码,完整 token 永不落审计流水。
+        self.store.record_event(
+            AuditEvent(
+                ledger_type="system",
+                event_type="connector_config_updated",
+                account_id="workspace",
+                reason="ifind refresh_token saved",
+                metadata={"connector": "ifind", "refresh_token_masked": mask_secret(refresh_token)},
+            )
+        )
+        connector = self.strategies.connectors.get("ifind")
+        test: dict = {"ok": False}
+        try:
+            bars = connector.get_bars(["000001.SZ"], frequency="1d", limit=1)
+            test = {"ok": True, "sample_bar": bars[-1] if bars else None}
+        except Exception as exc:  # noqa: BLE001 - 把连接失败原因原样带给前端。
+            test = {"ok": False, "error": str(exc)}
+        return {"saved": True, "refresh_token_masked": mask_secret(refresh_token), "test": test, "health": connector.healthcheck()}
 
     def _static(self, path: str) -> None:
         if path in {"", "/"}:

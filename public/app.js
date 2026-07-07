@@ -1199,6 +1199,7 @@ const CONNECTOR_DESCRIPTIONS = {
   tongdaxin: "通达信 HQ server(mootdx)，免密钥拉取 A 股实时 K 线",
   ricequant: "米筐 rqdatac，输入 license key 即连，专业数据源",
   wind: "辉隆 Wind 只读残血库(MySQL)，日频 A股/指数，需连内网 VPN",
+  ifind: "iFinD 同花顺 HTTP API，Mac 原生免 VPN，输入 refresh_token 即连(试用账号历史仅近 1 年)",
 };
 
 function renderDataConnectors() {
@@ -1230,6 +1231,16 @@ function renderDataConnectors() {
             </div>
           `
           : "";
+      const ifindConfig =
+        connector.name === "ifind"
+          ? `
+            <div class="connector-config">
+              <input id="ifindRefreshToken" type="password" autocomplete="off"
+                placeholder="${connector.refresh_token_masked ? `已保存 ${connector.refresh_token_masked} · 重新输入可更新` : "输入 iFinD refresh_token"}" />
+              <button type="button" data-action="save-ifind" class="primary">保存并测试</button>
+            </div>
+          `
+          : "";
       return `
         <div class="connector-card ${connector.status}">
           <div>
@@ -1242,6 +1253,7 @@ function renderDataConnectors() {
           ${connector.error ? `<span class="error">${escapeHtml(connector.error)}${connector.install ? ` · ${escapeHtml(connector.install)}` : ""}</span>` : ""}
           ${ricequantConfig}
           ${windConfig}
+          ${ifindConfig}
         </div>
       `;
     })
@@ -1278,6 +1290,24 @@ async function saveWindConfig() {
     showToast(`Wind 连接成功：${bar ? `${bar.symbol} ${bar.timestamp.slice(0, 10)} close ${bar.close}` : "已验证"}`);
   } else {
     showToast(`配置已保存，但连接测试失败(可能 VPN 未开)：${data.test?.error || "未知错误"}`);
+  }
+  await loadStrategies();
+}
+
+async function saveIfindConfig() {
+  const input = $("ifindRefreshToken");
+  const token = input.value.trim();
+  if (!token) {
+    showToast("请输入 iFinD refresh_token");
+    return;
+  }
+  showToast("正在连接 iFinD 验证 token…");
+  const data = await postJson("/api/data/connectors/ifind/credentials", { refresh_token: token });
+  if (data.test?.ok) {
+    const bar = data.test.sample_bar;
+    showToast(`iFinD 连接成功：${bar ? `${bar.symbol} ${bar.timestamp.slice(0, 10)} close ${bar.close}` : "已验证"}`);
+  } else {
+    showToast(`token 已保存，但连接测试失败：${data.test?.error || "未知错误"}`);
   }
   await loadStrategies();
 }
@@ -2850,6 +2880,9 @@ $("dataConnectors").addEventListener("click", (event) => {
   }
   if (event.target.closest("button[data-action='save-wind']")) {
     saveWindConfig().catch((error) => showToast(error.message));
+  }
+  if (event.target.closest("button[data-action='save-ifind']")) {
+    saveIfindConfig().catch((error) => showToast(error.message));
   }
 });
 $("defaultDataSource").addEventListener("change", (event) =>
