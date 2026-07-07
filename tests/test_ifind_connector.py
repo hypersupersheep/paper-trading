@@ -27,13 +27,22 @@ class _FakeResp(io.BytesIO):
         return False
 
 
-def _fake_urlopen(responses: dict[str, dict]):
-    """按端点返回预置 JSON。responses 键 = 端点名(get_access_token / cmd_history_quotation / high_frequency)。"""
-    def _open(req, timeout=30):
+class _FakeOpener:
+    """冒充 urllib build_opener() 的返回:按端点回预置 JSON。"""
+
+    def __init__(self, responses: dict[str, dict]):
+        self.responses = responses
+
+    def open(self, req, timeout=30):
         endpoint = req.full_url.rsplit("/", 1)[-1]
-        body = json.dumps(responses[endpoint]).encode("utf-8")
-        return _FakeResp(body)
-    return _open
+        return _FakeResp(json.dumps(self.responses[endpoint]).encode("utf-8"))
+
+
+def _patch_opener(responses: dict[str, dict]):
+    """patch data_connectors 里的 build_opener,让连接器的 HTTP 走假 opener。"""
+    return mock.patch.object(
+        data_connectors.urllib.request, "build_opener", lambda *a, **k: _FakeOpener(responses)
+    )
 
 
 class IFinDConnectorTest(unittest.TestCase):
@@ -57,7 +66,7 @@ class IFinDConnectorTest(unittest.TestCase):
                 }],
             },
         }
-        with mock.patch.object(data_connectors.urllib.request, "urlopen", _fake_urlopen(responses)):
+        with _patch_opener(responses):
             bars = conn.get_bars(["000001.SZ"], frequency="1d", limit=5, start="2026-06-29", end="2026-06-30")
         self.assertEqual(len(bars), 2)
         self.assertEqual(bars[-1]["symbol"], "000001.SZ")
@@ -79,7 +88,7 @@ class IFinDConnectorTest(unittest.TestCase):
                 }],
             },
         }
-        with mock.patch.object(data_connectors.urllib.request, "urlopen", _fake_urlopen(responses)):
+        with _patch_opener(responses):
             bars = conn.get_bars(["600000.SH"], frequency="5m", limit=10)
         self.assertEqual(len(bars), 2)
         self.assertEqual(bars[-1]["timestamp"], "2026-06-30T09:40:00")
@@ -91,7 +100,7 @@ class IFinDConnectorTest(unittest.TestCase):
             "get_access_token": {"data": {"access_token": "ACC"}},
             "cmd_history_quotation": {"errorcode": -4309, "errmsg": "history limited to 1 year", "tables": []},
         }
-        with mock.patch.object(data_connectors.urllib.request, "urlopen", _fake_urlopen(responses)):
+        with _patch_opener(responses):
             with self.assertRaises(ValueError) as ctx:
                 conn.get_bars(["000001.SZ"], frequency="1d", limit=5)
         self.assertIn("-4309", str(ctx.exception))

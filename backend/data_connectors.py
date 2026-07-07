@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -640,8 +641,18 @@ class IFinDDataConnector:
         req.add_header("Content-Type", "application/json")
         for k, v in headers.items():
             req.add_header(k, v)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        # 显式无代理 opener:打包 app 里 urllib 走系统代理探测可能异常,直连 API 更稳;并把 HTTP 错误体带出。
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", "ignore")[:300]
+            except Exception:  # noqa: BLE001
+                pass
+            raise ValueError(f"iFinD {endpoint} HTTP {exc.code}: {body or exc.reason}") from exc
 
     def _get_access_token(self, force: bool = False) -> str:
         rt = self._refresh_token()
@@ -657,9 +668,14 @@ class IFinDDataConnector:
         return tok
 
     def _call(self, endpoint: str, payload: dict) -> dict:
-        """带 access_token 调数据端点;遇 token 类错误自动刷新一次重试。"""
+        """带 access_token 调数据端点;HTTP 层失败(如缓存 token 失效返 401)或 JSON 层 token 错误,
+        都强制换新 access_token 重试一次。"""
         tok = self._get_access_token()
-        j = self._http_post(endpoint, {"access_token": tok}, payload)
+        try:
+            j = self._http_post(endpoint, {"access_token": tok}, payload)
+        except ValueError:
+            tok = self._get_access_token(force=True)  # 换新 token 重试一次
+            j = self._http_post(endpoint, {"access_token": tok}, payload)
         ec = j.get("errorcode")
         if ec not in (0, None) and ("token" in str(j.get("errmsg", "")).lower() or ec in (-1001, -1010, -1011)):
             tok = self._get_access_token(force=True)
